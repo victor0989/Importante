@@ -1,0 +1,377 @@
+# modules/antenna_hga.py
+# Antenna HGA subassembly module compatible with FreeCAD 0.20+
+# - Provides make_antenna_hga(doc, P) which builds a parametric HGA assembly
+# - Architecture: Parts → Subassembly (group) → Assembly (returned group)
+# - Manufacturable rules:
+#   * Simple primitive geometry (cylinders, cones, discs, boxes)
+#   * Minimal and constant wall thicknesses (wall_thk)
+#   * Parametric chamfers/radius (chamfer_r, fillet_r)
+#   * Avoids closed internal cavities: all holes are through-holes or open
+#   * Uses local coordinate placement (origin, rotation)
+# - CNC/printing considerations noted in comments for each feature
+# - No external dependencies; uses Part, FreeCAD App/Gui only.
+#
+# Usage:
+#   import modules.antenna_hga as hga
+#   hga.make_antenna_hga(doc, P)
+#
+# The function will add a DocumentObjectGroup to 'doc' and return it.
+# It also registers each Part::Feature separately (one per physical piece).
+
+import FreeCAD as App
+import Part
+import math
+
+# ---------------------------
+# Default parameter set stored under P['antenna_hga']
+# Each parameter has a short comment describing purpose and units (same units as doc, typically mm)
+# ---------------------------
+DEFAULTS = {
+    # Geometric / global
+    "name": "ANTENNA_HGA",
+    "origin": (0.0, 0.0, 0.0),            # local coordinate origin for the module (x,y,z)
+    "scale": 1.0,                         # uniform scale factor (default 1.0)
+    "orientation_deg": (0.0, 0.0, 0.0),   # Euler rotations (deg) applied to subassembly placement
+
+    # Dish geometry
+    "dish_diam": 900.0,                   # diameter of main dish rim (mm)
+    "dish_depth": 120.0,                  # depth of dish (mm) approximated as shallow cone/frustum
+    "dish_wall_thk": 3.0,                 # wall thickness of the dish (mm) - constant thickness for manufacturability
+    "dish_segment_max": 300.0,            # max printable segment length (mm) before splitting (3D printing)
+
+    # Subreflector & feed
+    "subreflector_diam": 180.0,           # diameter of subreflector (mm)
+    "subreflector_h": 30.0,               # height of subreflector (mm)
+    "feed_support_r": 8.0,                # radius of a through mast/feed support (mm) - tube radius
+    "feed_through_hole": True,            # create through-hole in subreflector for feed cable
+
+    # Mast / mast interface
+    "mast_length": 600.0,                 # mast length (mm)
+    "mast_outer_r": 20.0,                 # outer radius of mast tube (mm)
+    "mast_wall_thk": 2.5,                 # mast wall thickness (mm)
+    "mast_flange_diam": 120.0,            # flange diameter at base (mm)
+    "flange_thk": 8.0,                    # flange thickness (mm)
+    "bolt_count": 4,                      # number of bolt holes on flange (evenly spaced)
+    "bolt_diam": 8.0,                     # diameter of through-bolts (mm)
+    "bolt_pushout": True,                 # if True create through holes in flange (CNC-friendly)
+
+    # Tolerances & manufacturability
+    "wall_thk_min": 1.5,                  # minimum wall thickness allowed for printing/CNC (mm)
+    "tolerance": 0.3,                     # general assembly tolerance (mm) - used for clearance
+    "chamfer_r": 1.2,                     # chamfer radius for edges (mm) - small break for CNC/print
+    "fillet_r": 0.8,                      # fillet radius applied where applicable (mm)
+
+    # Material tagging (informative)
+    "material": "AL7075",                 # default material label (informative property)
+
+    # Export / splitting for printing
+    "split_for_print": True,              # if True, split dish into printable segments if too large
+    "max_print_size": 300.0,              # max dimension for a single printable piece (mm)
+}
+
+# ---------------------------
+# Local helpers: placement, transforms, primitives, and a local add_obj() to register Parts
+# These are intentionally minimal and self-contained so the module can be imported standalone.
+# ---------------------------
+def _scale_val(v, s):
+    return v * s
+
+def _vec(v):
+    return App.Vector(v[0], v[1], v[2])
+
+def _placement_from_origin(origin, orientation_deg):
+    # Build App.Placement from origin tuple and euler orientation (deg)
+    ox, oy, oz = origin
+    rx, ry, rz = orientation_deg
+    # Apply rotations as Z, Y, X order for predictability
+    rot = App.Rotation(App.Vector(0,0,1), rz).multiply(App.Rotation(App.Vector(0,1,0), ry)).multiply(App.Rotation(App.Vector(1,0,0), rx))
+    return App.Placement(App.Vector(ox, oy, oz), rot)
+
+def add_obj(doc, shape, name, color=None, group=None, alpha=0.0):
+    """
+    Create a Part::Feature in doc with given shape and name, register in optional group.
+    Returns the created object.
+    """
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    if color is not None:
+        try:
+            o.ViewObject.ShapeColor = color
+            o.ViewObject.Transparency = int(alpha * 100)
+        except Exception:
+            pass
+    if group is not None:
+        try:
+            group.addObject(o)
+        except Exception:
+            pass
+    return o
+
+def tag_material_props(o, matname, density=None, emissivity=None):
+    # Add lightweight informative properties to the feature for downstream tooling/export
+    try:
+        if not hasattr(o, "Material"):
+            o.addProperty("App::PropertyString","Material","Meta","Material")
+        o.Material = str(matname)
+        if density is not None and not hasattr(o, "Density"):
+            o.addProperty("App::PropertyFloat","Density","Meta","Density")
+            o.Density = float(density)
+        if emissivity is not None and not hasattr(o, "Emissivity"):
+            o.addProperty("App::PropertyFloat","Emissivity","Meta","Emissivity")
+            o.Emissivity = float(emissivity)
+    except Exception:
+        pass
+
+# Basic primitives centered at local origin for predictable placements
+def centered_cylinder(height, radius, axis='Z', center=True):
+    cyl = Part.makeCylinder(radius, height)
+    if axis == 'X':
+        cyl.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif axis == 'Y':
+        cyl.rotate(App.Vector(0,0,0), App.Vector(1,0,0), 90)
+    if center:
+        if axis == 'Z':
+            cyl.translate(App.Vector(0,0,-height/2.0))
+        elif axis == 'X':
+            cyl.translate(App.Vector(-height/2.0,0,0))
+        elif axis == 'Y':
+            cyl.translate(App.Vector(0,-height/2.0,0))
+    return cyl
+
+def centered_cone(r1, r2, height, axis='Z', center=True):
+    cone = Part.makeCone(r1, r2, height)
+    if axis == 'X':
+        cone.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif axis == 'Y':
+        cone.rotate(App.Vector(0,0,0), App.Vector(1,0,0), 90)
+    if center:
+        if axis == 'Z':
+            cone.translate(App.Vector(0,0,-height/2.0))
+        elif axis == 'X':
+            cone.translate(App.Vector(-height/2.0,0,0))
+        elif axis == 'Y':
+            cone.translate(App.Vector(0,-height/2.0,0))
+    return cone
+
+def centered_disk(radius, thickness, center=True):
+    # Approximated as a short cylinder
+    return centered_cylinder(thickness, radius, axis='Z', center=center)
+
+# ---------------------------
+# Main builder function: make_antenna_hga
+# - doc: FreeCAD document to which objects are added
+# - P: dictionary with global parameters; module reads/creates P['antenna_hga']
+# Returns the created top-level group for the subassembly
+# ---------------------------
+def make_antenna_hga(doc, P):
+    """
+    Build a parametric HGA antenna subassembly:
+      - flange (mounting) with bolt holes (CNC-friendly through holes)
+      - mast (thin-walled tube) with constant wall_thk (CNC/print friendly)
+      - feed support (tube) and subreflector
+      - primary dish approximated as thin frustum (open, single-wall)
+      - each physical piece is a Part::Feature and is added to a Subassembly group
+    """
+    # Merge defaults with provided P; preserve user-specified P dict
+    local = dict(DEFAULTS)
+    user_local = {}
+    if isinstance(P, dict) and "antenna_hga" in P and isinstance(P["antenna_hga"], dict):
+        user_local = P["antenna_hga"]
+    # Update defaults with user overrides
+    local.update(user_local)
+    # Ensure P['antenna_hga'] exists for external visibility
+    P["antenna_hga"] = local
+
+    # Apply scale early for all dimensions
+    s = float(local.get("scale", 1.0))
+    tol = float(local.get("tolerance", 0.3))
+    wall_thk = max(float(local.get("dish_wall_thk", 3.0)) * s, float(local.get("wall_thk_min", 1.5)) )
+    mast_wall = max(float(local.get("mast_wall_thk", 2.5)) * s, float(local.get("wall_thk_min", 1.5)) )
+
+    origin = tuple(local.get("origin", (0.0,0.0,0.0)))
+    orientation_deg = tuple(local.get("orientation_deg", (0.0,0.0,0.0)))
+    placement = _placement_from_origin(origin, orientation_deg)
+
+    # Create assembly groups: Part -> Subassembly -> Assembly
+    # Part layer: individual parts; Subassembly: this antenna assembly; Assembly: caller-level assembly can add this group
+    subassembly_name = f"{local.get('name','ANTENNA_HGA')}_SUBASSEMBLY"
+    g_sub = doc.addObject("App::DocumentObjectGroup", subassembly_name)
+
+    # 1) Flange (mounting interface) - simple disc with through-bolt holes
+    flange_r = _scale_val(local.get("mast_flange_diam",120.0)/2.0, s)
+    flange_thk = _scale_val(local.get("flange_thk",8.0), s)
+    flange = centered_disk(flange_r, flange_thk, center=True)
+    flange.translate(App.Vector(0,0, -flange_thk/2.0))  # top surface at z=0 in subassembly local CS
+    flange_obj = add_obj(doc, flange, f"{local.get('name')}_Flange", color=(0.7,0.7,0.7), group=g_sub)
+    tag_material_props(flange_obj, local.get("material","AL7075"))
+
+    # Bolt holes (through holes) - create cylinders and cut them from flange (simple boolean cuts)
+    bolt_count = int(local.get("bolt_count",4))
+    bolt_diam = _scale_val(local.get("bolt_diam",8.0), s)
+    bolt_r = bolt_diam / 2.0
+    bolt_circle_r = flange_r * 0.65  # radial position for bolts
+    holes = []
+    for i in range(bolt_count):
+        ang = 360.0 * i / bolt_count
+        x = bolt_circle_r * math.cos(math.radians(ang))
+        y = bolt_circle_r * math.sin(math.radians(ang))
+        # through hole height larger than flange for reliable boolean subtraction
+        hole_cyl = Part.makeCylinder(bolt_r, flange_thk + 6.0)
+        hole_cyl.translate(App.Vector(x, y, -flange_thk/2.0 - 3.0))
+        holes.append(hole_cyl)
+    # Perform cuts in a single operation (simple boolean - acceptable for few pieces)
+    try:
+        flange_cut = flange
+        for h in holes:
+            flange_cut = flange_cut.cut(h)
+        flange_obj.Shape = flange_cut
+    except Exception:
+        # If boolean fails, keep original flange and create hole markers (CNC plan)
+        for idx,h in enumerate(holes):
+            add_obj(doc, h, f"{local.get('name')}_BoltHoleMarker_{idx+1}", color=(1.0,0.2,0.2), group=g_sub, alpha=0.6)
+
+    # 2) Mast (thin-walled tube) - open tubular (no closed cavities)
+    mast_len = _scale_val(local.get("mast_length",600.0), s)
+    mast_or = _scale_val(local.get("mast_outer_r",20.0), s)
+    mast_ir = max(mast_or - mast_wall, mast_or * 0.4)  # ensure inner radius less than outer; avoid negative
+    mast_outer = Part.makeCylinder(mast_or, mast_len)
+    mast_inner = Part.makeCylinder(mast_ir, mast_len + 2.0)
+    mast_outer.translate(App.Vector(0,0, -mast_len/2.0))
+    mast_inner.translate(App.Vector(0,0, -mast_len/2.0 - 1.0))
+    try:
+        mast_shell = mast_outer.cut(mast_inner)  # thin-walled tube
+        # position: fixed on top of flange (z positive)
+        mast_shell.translate(App.Vector(0,0, flange_thk/2.0 + mast_len/2.0))
+        mast_obj = add_obj(doc, mast_shell, f"{local.get('name')}_Mast", color=(0.6,0.6,0.65), group=g_sub)
+        tag_material_props(mast_obj, local.get("material","AL7075"))
+    except Exception:
+        # Fallback: create a solid tube as outer cylinder (will be less ideal)
+        mast_outer.translate(App.Vector(0,0, flange_thk/2.0 + mast_len/2.0))
+        mast_obj = add_obj(doc, mast_outer, f"{local.get('name')}_Mast_SolidFallback", color=(0.6,0.6,0.65), group=g_sub)
+        tag_material_props(mast_obj, local.get("material","AL7075"))
+
+    # 3) Feed support: small tube mounted on mast, supporting subreflector and feed
+    feed_r = _scale_val(local.get("feed_support_r",8.0), s)
+    feed_len = max(60.0 * s, 40.0 * s)
+    feed = Part.makeCylinder(feed_r, feed_len)
+    # Position feed on mast tip (extend forward along +Z relative to mast top)
+    feed.translate(App.Vector(0, 0, flange_thk/2.0 + mast_len - feed_len/2.0))
+    feed_obj = add_obj(doc, feed, f"{local.get('name')}_FeedSupport", color=(0.85,0.3,0.2), group=g_sub)
+    tag_material_props(feed_obj, local.get("material","AL7075"))
+
+    # 4) Subreflector: small convex cone, optionally with through hole for feed cable
+    sub_d = _scale_val(local.get("subreflector_diam",180.0), s)
+    sub_h = _scale_val(local.get("subreflector_h",30.0), s)
+    sub_outer = Part.makeCone(sub_d/2.0, 0.0, sub_h)
+    # place subreflector tip pointing +Z, located forward of feed support
+    sub_outer.translate(App.Vector(0,0, flange_thk/2.0 + mast_len - feed_len + sub_h/2.0))
+    # If feed_through_hole True: subtract small cylinder centered coaxially
+    if local.get("feed_through_hole", True):
+        hole_r = max(1.0 * s, feed_r * 0.4)
+        hole = Part.makeCylinder(hole_r, sub_h + 6.0)
+        hole.translate(App.Vector(0,0, flange_thk/2.0 + mast_len - feed_len))
+        try:
+            sub_final = sub_outer.cut(hole)
+            sub_obj = add_obj(doc, sub_final, f"{local.get('name')}_Subreflector", color=(1.0,1.0,0.6), group=g_sub)
+        except Exception:
+            sub_obj = add_obj(doc, sub_outer, f"{local.get('name')}_Subreflector", color=(1.0,1.0,0.6), group=g_sub)
+    else:
+        sub_obj = add_obj(doc, sub_outer, f"{local.get('name')}_Subreflector", color=(1.0,1.0,0.6), group=g_sub)
+    tag_material_props(sub_obj, local.get("material","AL7075"))
+
+    # 5) Primary dish approximated as thin frustum (outer cone minus inner cone) - open towards +Z
+    dish_d = _scale_val(local.get("dish_diam",900.0), s)
+    dish_depth = _scale_val(local.get("dish_depth",120.0), s)
+    dish_r_outer = dish_d / 2.0
+    dish_r_inner = max(0.0, dish_r_outer - wall_thk)
+    # Build outer frustum (shallow cone) and inner cone for cut
+    # For manufacturability we create a frustum using two cones and a cylinder for rim thickness
+    # Outer cone: apex toward +Z (we place dish such that rim sits at +Z)
+    # We'll create the dish centered around origin in local Z = flange_thk/2 + mast_len + offset
+    # To keep geometry simple we approximate parabola with shallow cone
+    outer_cone = Part.makeCone(dish_r_outer, dish_r_outer * 0.05, dish_depth)  # r1 at base, r2 small apex
+    inner_cone = Part.makeCone(dish_r_inner, max(dish_r_inner*0.05, 1e-3), dish_depth + 2.0)
+    # Position cones so base (large radius) at Z = flange_thk/2 + mast_len + dish_depth/2
+    dish_z = flange_thk/2.0 + mast_len + dish_depth/2.0 + 6.0  # offset dish forward slightly beyond mast top
+    outer_cone.translate(App.Vector(0, 0, dish_z - dish_depth/2.0))
+    inner_cone.translate(App.Vector(0, 0, dish_z - dish_depth/2.0 - 1.0))
+    try:
+        dish_shell = outer_cone.cut(inner_cone)
+        # Trim a central opening so subreflector and feed are visible (no closed cavities)
+        central_open_r = max(sub_d/2.0 + tol, feed_r * 1.6)
+        central_cyl = Part.makeCylinder(central_open_r, dish_depth + 10.0)
+        central_cyl.translate(App.Vector(0,0, dish_z - dish_depth/2.0 - 5.0))
+        dish_shell = dish_shell.cut(central_cyl)
+        dish_obj = add_obj(doc, dish_shell, f"{local.get('name')}_Dish", color=(0.9,0.9,0.95), group=g_sub)
+        tag_material_props(dish_obj, local.get("material","AL7075"))
+    except Exception:
+        # If cut fails, just add the outer cone as placeholder (still printable)
+        outer_cone.translate(App.Vector(0,0,0))  # already translated
+        dish_obj = add_obj(doc, outer_cone, f"{local.get('name')}_Dish_Fallback", color=(0.9,0.9,0.95), group=g_sub)
+        tag_material_props(dish_obj, local.get("material","AL7075"))
+
+    # 6) Optional: split dish into printable segments if larger than max_print_size
+    if local.get("split_for_print", True):
+        max_size = float(local.get("max_print_size", 300.0)) * s
+        if dish_d > max_size * 1.05:
+            # We will create simple radial split markers to guide external splitting.
+            # Avoid destructive boolean splits here: create marker planes (thin boxes) to indicate split locations.
+            n_splits = int(math.ceil(dish_d / max_size))
+            # At minimum 2 splits (halves)
+            n_splits = max(2, n_splits)
+            split_angle = 360.0 / n_splits
+            for i in range(n_splits):
+                ang = math.radians(i * split_angle)
+                # thin box passing through dish along Z to mark split plane
+                box_w = dish_d * 1.2
+                box_h = 4.0
+                box_t = dish_depth + 20.0
+                # create a thin marker as Part.makeBox then rotate and position
+                marker = Part.makeBox(box_w, box_h, box_t)
+                # center marker at origin
+                marker.translate(App.Vector(-box_w/2.0, -box_h/2.0, dish_z - box_t/2.0))
+                # rotate marker by ang about Z
+                marker.rotate(App.Vector(0,0,0), App.Vector(0,0,1), math.degrees(ang))
+                add_obj(doc, marker, f"{local.get('name')}_SplitMarker_{i+1}", color=(0.2,0.2,0.9), group=g_sub, alpha=0.85)
+
+    # 7) Assembly placement: apply global placement to group so caller can position entire subassembly
+    try:
+        g_sub.Placement = placement
+    except Exception:
+        pass
+
+    # 8) Technical comments as informative properties on the group (helpful for export/CAM)
+    try:
+        if not hasattr(g_sub, "Info"):
+            g_sub.addProperty("App::PropertyStringList", "ManufacturingNotes", "Meta", "Manufacturing notes")
+        notes = []
+        notes.append(f"Module: {local.get('name')}")
+        notes.append(f"Scale: {s}")
+        notes.append(f"Wall_thk (dish): {wall_thk} mm, Mast_wall: {mast_wall} mm")
+        notes.append("Design rules: no closed internal cavities; holes are through-holes for CNC")
+        g_sub.ManufacturingNotes = notes
+    except Exception:
+        pass
+
+    # Return the subassembly group object so the caller can integrate into higher-level Assembly
+    return g_sub
+
+# Allow running module standalone in FreeCAD for quick test (creates a document named ANT_Test_Antenna)
+if __name__ == "__main__":
+    try:
+        doc_name = "ANT_Test_Antenna"
+        if App.ActiveDocument is None or App.ActiveDocument.Name != doc_name:
+            try:
+                doc = App.newDocument(doc_name)
+            except Exception:
+                doc = App.ActiveDocument
+        else:
+            doc = App.ActiveDocument
+        Pglobal = {}
+        # put our defaults into Pglobal to demonstrate
+        Pglobal['antenna_hga'] = dict(DEFAULTS)
+        g = make_antenna_hga(doc, Pglobal)
+        doc.recompute()
+        print("Antenna HGA subassembly created:", g.Name)
+    except Exception as e:
+        print("Error creating antenna HGA in standalone mode:", str(e))

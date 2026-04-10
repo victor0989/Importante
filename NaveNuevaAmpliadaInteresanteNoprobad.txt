@@ -1,0 +1,706 @@
+# -*- coding:utf-8 -*-
+"""
+DFD_Simplificada.py (refactor)
+Versión refactorizada para FreeCAD 0.20+
+Objetivos:
+ - Estructura por módulos (make_<modulo>(doc, P))
+ - Helpers reutilizables: T(), R(), centered_box(), cyl(), cone(), ring()
+ - Parametrización completa con DEFAULTS y subdiccionarios P['<modulo>']
+ - Manufacturabilidad: espesores (wall_thk), tolerancias, partes independientes
+ - Evitar booleanos pesados; cada pieza es Part::Feature separada
+ - Subensamblajes: App::DocumentObjectGroup bajo /modules
+ - Mantener compatibilidad con la API pública existente (add_obj, crear_*)
+"""
+
+import FreeCAD as App
+import Part
+import math
+from typing import Tuple
+
+# Documento principal
+doc = App.newDocument("Nave_DFD_Simplificada")
+
+# =============================================================================
+# DEFAULTS y parámetros globales documentados
+# =============================================================================
+DEFAULTS = {
+    # Global
+    'scale': 1.0,
+    'tolerance': 0.2,   # mm, tolerancia general para encajes
+    'wall_thk': 4.0,    # mm, espesor mínimo de paredes (paramétrico)
+    'fillet_r': 2.0,    # mm, radio visual (implementado como pieza separada para evitar booleanos pesados)
+    'chamfer_r': 2.0,   # mm, chaflán visual (pieza separada)
+    # Fuselaje (dimensiones base, escala libre)
+    'nose_len': 1500.0,
+    'nose_base_d': 1100.0,
+    'mid_len': 3000.0,
+    'mid_d': 1800.0,
+    'rear_len': 1500.0,
+    'rear_d': 2200.0,
+    # Reactor
+    'reactor_d': 1500.0,
+    'reactor_l': 1800.0,
+    # Habitat
+    'hab_d': 1400.0,
+    'hab_l': 2500.0,
+    # Cabina
+    'cockpit_d': 900.0,
+    'cockpit_l': 800.0,
+    # Tanques
+    'tank_r': 400.0,
+    'tank_l': 2000.0,
+    'tank_off': 1200.0,
+    # Paneles solares
+    'panel_l': 3000.0,
+    'panel_w': 1500.0,
+    'panel_count': 2,
+    # Antena
+    'mast_l': 1000.0,
+    'mast_r': 40.0,
+    'dish_r': 400.0,
+    # Tren aterrizaje
+    'leg_r': 100.0,
+    'leg_l': 800.0,
+    'foot_r': 250.0,
+    'foot_t': 50.0,
+    'leg_count': 3,
+    # Docking
+    'dock_r': 400.0,
+    'dock_l': 300.0,
+    # Radiadores
+    'wing_span': 2500.0,
+    'wing_th': 60.0,
+    'wing_l': 2200.0,
+    # Manufactura / ensamblaje
+    'max_section_length': 1200.0,  # mm, sección máxima imprimible o manejable
+}
+
+# PARAMETROS finales: copia DEFAULTS para permitir sobreescritura
+P = DEFAULTS.copy()
+
+# Añadir subdiccionarios de módulos con parámetros documentados
+P['shield'] = {
+    'layers': 3,               # número de capas Whipple
+    'layer_thk': 2.0,          # mm, cada capa de blindaje
+    'sep_gap': 20.0,           # mm, separación entre capas
+    'diameter': P['mid_d'],    # diámetro efectivo del área protegida
+}
+
+P['radiator'] = {
+    'plate_w': 1200.0,
+    'plate_h': 600.0,
+    'plate_thk': 8.0,
+    'heatpipe_d': 6.0,
+    'heatpipe_count': 6,
+    'manifold_thk': 6.0,
+}
+
+P['truss'] = {
+    'bay_count': 6,
+    'bay_length': 400.0,
+    'chord': 600.0,
+    'strut_d': 10.0,
+}
+
+P['boom'] = {
+    'sections': 3,
+    'section_d': 40.0,
+    'section_l': 800.0,
+    'overlap': 20.0,  # mm de solape entre secciones para montaje mecanizado
+}
+
+P['hga'] = {
+    'dish_r': 400.0,
+    'dish_depth': 120.0,
+    'feed_d': 40.0,
+    'subref_r': 60.0,
+    'mast_r': 40.0,
+    'mast_l': 600.0,
+}
+
+P['solar_panel'] = {
+    'panel_l': P['panel_l'],
+    'panel_w': P['panel_w'],
+    'panel_thk': 40.0,   # mm, sandwich estructural
+    'hinge_d': 20.0,
+    'layers': 3,         # triple-junction stack visual
+}
+
+P['rack'] = {
+    'rack_w': 600.0,
+    'rack_h': 300.0,
+    'rack_d': 400.0,
+    'shelf_thk': 8.0,
+    'mount_holes_d': 6.0,
+    'mount_pattern': (4, 2),  # columns, rows
+}
+
+# =============================================================================
+# HELPERS REUTILIZABLES
+# Notas de diseño:
+# - Evitar booleans pesados; muchas "mejoras estéticas" se modelan como piezas adicionales
+# - Los helpers crean Part shapes; add_obj() registra cada pieza como Part::Feature
+# =============================================================================
+
+def add_obj(shape: Part.Shape, name: str):
+    """
+    Registra la forma como Part::Feature en el documento global 'doc'.
+    Mantiene la API pública original.
+    """
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    return obj
+
+# Transformaciones simples (devuelven App.Vector o rotaciones simples)
+def T(x=0.0, y=0.0, z=0.0) -> App.Vector:
+    """Traslación vector (helper)"""
+    return App.Vector(x, y, z)
+
+def R(rx=0.0, ry=0.0, rz=0.0) -> App.Rotation:
+    """Rotación helper (grados a radianes internamente usa FreeCAD rotation en grados)"""
+    # FreeCAD Rota acepta axis/angle o quaternion; aquí devolvemos rotación por euler ZYX
+    return App.Rotation(App.Vector(0, 0, 1), rz).multiply(
+           App.Rotation(App.Vector(0, 1, 0), ry)).multiply(
+           App.Rotation(App.Vector(1, 0, 0), rx))
+
+def centered_box(x: float, y: float, z: float, center: Tuple[float,float,float]=(0,0,0)) -> Part.Shape:
+    """
+    Crea un box centrado en (0,0,0) y lo deja listo para ubicar.
+    No realiza booleans; la pieza resultante es un sólido manufacturable (esquinas sin fillet).
+    """
+    b = Part.makeBox(x, y, z)
+    # Mover para que esté centrado respecto al eje X-Y y colocado en Z inferior
+    b.translate(App.Vector(-x/2.0 + center[0], -y/2.0 + center[1], center[2]))
+    return b
+
+def cyl(radius: float, height: float, center_z: float=0.0) -> Part.Shape:
+    """Crea un cilindro con base centrada en XY y base en Z=center_z"""
+    c = Part.makeCylinder(radius, height)
+    c.translate(App.Vector(0, 0, center_z))
+    return c
+
+def cone(r1: float, r2: float, height: float, center_z: float=0.0) -> Part.Shape:
+    """Crea un cono truncado que tiene base centrada en XY y base en Z=center_z"""
+    co = Part.makeCone(r1, r2, height)
+    co.translate(App.Vector(0, 0, center_z))
+    return co
+
+def ring(outer_r: float, inner_r: float, height: float, center_z: float=0.0) -> Part.Shape:
+    """
+    Crea un anillo (sleeve) como diferencia (outer - inner). Se usa boolean de corte único.
+    Evitar sobrecarga de booleanos: usado sólo para piezas pequeñas/precisas (bridas).
+    """
+    outer = Part.makeCylinder(outer_r, height)
+    inner = Part.makeCylinder(inner_r, height + 2.0)  # +2 para asegurar corte limpio
+    inner.translate(App.Vector(0, 0, -1.0))  # alinear para garantizar corte seguro
+    try:
+        sleeve = outer.cut(inner)
+    except Exception as e:
+        # En caso de fallo de booleano, devolvemos la geometría externa (sera mecanizada posteriormente)
+        App.Console.PrintMessage(f"Warning: ring boolean failed: {e}\nReturning outer cylinder as fallback\n")
+        sleeve = outer
+    sleeve.translate(App.Vector(0, 0, center_z))
+    return sleeve
+
+def add_fillet_markers(box_shape: Part.Shape, fillet_r: float, name_prefix: str, positions: Tuple[Tuple[float,float,float], ...]):
+    """
+    Añade esferas pequeñas en las esquinas para simular visualmente fillet r sin booleanos.
+    Cada esfera es un Part::Feature independiente para evitar operaciones pesadas.
+    Esto permite mantener la geometría primitiva separable y apta para CNC.
+    """
+    markers = []
+    if fillet_r <= 0.01:
+        return markers
+    for idx, pos in enumerate(positions):
+        s = Part.makeSphere(fillet_r)
+        s.translate(App.Vector(pos[0], pos[1], pos[2]))
+        obj = add_obj(s, f"{name_prefix}_fillet_mark_{idx}")
+        markers.append(obj)
+    return markers
+
+def add_chamfer_marker(edge_center: Tuple[float,float,float], chamfer_r: float, name: str):
+    """
+    Añade un cilindro pequeño en el centro del borde para indicar chaflán.
+    Es solo marcador visual (evita booleans).
+    """
+    if chamfer_r <= 0.01:
+        return None
+    c = Part.makeCylinder(chamfer_r, chamfer_r * 0.6)
+    c.translate(App.Vector(edge_center[0], edge_center[1], edge_center[2] - chamfer_r * 0.3))
+    return add_obj(c, name)
+
+# Helper para dividir piezas largas en secciones imprimibles
+def split_into_sections(length: float, max_section_length: float):
+    """
+    Devuelve una lista de longitudes que suman 'length' donde cada elemento <= max_section_length.
+    Esto facilita dividir piezas para impresión/CNC.
+    """
+    if length <= max_section_length:
+        return [length]
+    sections = []
+    remaining = length
+    while remaining > 0:
+        l = min(remaining, max_section_length)
+        sections.append(l)
+        remaining -= l
+    return sections
+
+# =============================================================================
+# ESTRUCTURA DE MÓDULOS (tipo CATIA/SW): cada módulo tiene P['<mod>'] y función make_<mod>(doc,P)
+# - Cada pieza creada se registra con add_obj
+# - Cada módulo crea un App::DocumentObjectGroup con nombre "modules::<modulo>"
+# =============================================================================
+
+def make_shield(doc, P_mod):
+    """
+    Blindaje tipo Whipple multicapa con separadores.
+    - Cada capa es un disco delgado (no un sólido hendido) para evitar cavidades cerradas.
+    - Separadores son anillos/perfiles independientes (montaje por distanciadores).
+    - Todo queda como piezas separadas para montaje mecánico.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Shield")
+    diameter = P_mod.get('diameter', P['mid_d'])
+    layers = int(P_mod.get('layers', 3))
+    layer_thk = P_mod.get('layer_thk', 2.0)
+    sep_gap = P_mod.get('sep_gap', 20.0)
+    radius = diameter / 2.0 - P['tolerance']
+    z_base = P['nose_len'] + P['mid_len'] * 0.5  # posición aproximada en el fuselaje
+
+    # Crear cada tapa de blindaje como disco (placa fina) y anillo separador
+    for i in range(layers):
+        z = z_base + i * (layer_thk + sep_gap)
+        plate = Part.makeCylinder(radius, layer_thk)
+        plate.translate(T(0, 0, z))
+        obj_plate = add_obj(plate, f"Shield_plate_{i}")
+        grp.addObject(obj_plate)
+
+        # Separador como anillo (pequeña altura)
+        ring_h = min(15.0, sep_gap * 0.5)
+        sep_outer = radius + 20.0
+        sep_inner = radius - 20.0
+        sep = ring(sep_outer, sep_inner, ring_h, center_z=z + layer_thk + 2.0)
+        obj_sep = add_obj(sep, f"Shield_sep_{i}")
+        grp.addObject(obj_sep)
+
+    return grp
+
+def make_radiator(doc, P_mod):
+    """
+    Radiador con placas y heatpipes (representadas por cilindros).
+    - Placas separadas (Part::Feature) y heatpipes como cilindros discretos.
+    - Manifold representado como box, sin booleans complejos.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Radiator")
+    plate_w = P_mod.get('plate_w', 1200.0)
+    plate_h = P_mod.get('plate_h', 600.0)
+    plate_thk = P_mod.get('plate_thk', 8.0)
+    hp_d = P_mod.get('heatpipe_d', 6.0)
+    hp_count = int(P_mod.get('heatpipe_count', 6))
+    manifold_thk = P_mod.get('manifold_thk', 6.0)
+
+    z = P['nose_len'] + P['mid_len'] + 200.0
+
+    # Placa principal (dividida en secciones si demasiado larga)
+    plate = centered_box(plate_w, plate_h, plate_thk, center=(0, 0, z))
+    obj_plate = add_obj(plate, "Radiator_plate")
+    grp.addObject(obj_plate)
+
+    # Heatpipes: colocados en parrilla, todos como piezas independientes
+    spacing = plate_w / (hp_count + 1)
+    for i in range(hp_count):
+        x = -plate_w/2 + (i+1)*spacing
+        hp = Part.makeCylinder(hp_d/2.0, plate_thk + 40.0)
+        hp.translate(T(x, 0, z - 10.0))
+        obj_hp = add_obj(hp, f"Heatpipe_{i}")
+        grp.addObject(obj_hp)
+
+    # Manifold inferior (representación)
+    manifold = centered_box(plate_w * 0.4, plate_h * 0.4, manifold_thk, center=(0, -plate_h*0.6, z - 20.0))
+    obj_man = add_obj(manifold, "Radiator_manifold")
+    grp.addObject(obj_man)
+
+    return grp
+
+def make_truss(doc, P_mod):
+    """
+    Truss tipo sonda solar, con barras cilíndricas y placas de unión.
+    - Evitar booleans: las placas y barras son piezas independientes atornillables.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Truss")
+    bay_count = int(P_mod.get('bay_count', 6))
+    bay_length = P_mod.get('bay_length', 400.0)
+    chord = P_mod.get('chord', 600.0)
+    d = P_mod.get('strut_d', 10.0)
+
+    z0 = P['nose_len'] + 200.0
+    for b in range(bay_count):
+        x = b * bay_length - (bay_count-1) * bay_length / 2.0
+        # 4 barras formando un prisma rectangular
+        for signx in (-1, 1):
+            for signy in (-1, 1):
+                bar = Part.makeCylinder(d/2.0, bay_length)
+                # Rotate bar along its length: create along Z then rotate? easiest is create along Z and translate then rotate.
+                # We'll place bars along X by rotating 90 deg around Y
+                bar.translate(T(0, 0, 0))
+                bar = bar.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+                bar.translate(T(x, signy * chord/2.0, z0))
+                obj_bar = add_obj(bar, f"Truss_bar_b{b}_{signx}_{signy}")
+                grp.addObject(obj_bar)
+        # Placa de unión en inicio de cada bay (representación)
+        plate = centered_box(60.0, 60.0, 4.0, center=(x, 0, z0))
+        obj_plate = add_obj(plate, f"Truss_plate_b{b}")
+        grp.addObject(obj_plate)
+    return grp
+
+def make_boom(doc, P_mod):
+    """
+    Booms telescópicos científicos divididos en secciones.
+    - Cada sección es un cilindro hueco representado por cilindro externo + marcador interior (no boolean).
+    - Secciones separables para fabricación.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Boom")
+    sections = int(P_mod.get('sections', 3))
+    sec_d = P_mod.get('section_d', 40.0)
+    sec_l = P_mod.get('section_l', 800.0)
+    overlap = P_mod.get('overlap', 20.0)
+    z0 = P['nose_len'] + P['mid_len'] + 100.0
+
+    for i in range(sections):
+        z = z0 + i * (sec_l - overlap)
+        ext = Part.makeCylinder(sec_d/2.0, sec_l)
+        ext.translate(T(0, 0, z))
+        obj_ext = add_obj(ext, f"Boom_section_ext_{i}")
+        grp.addObject(obj_ext)
+        # marcador interior (simula tubo interior) como cilindro fino
+        inner = Part.makeCylinder(sec_d/2.0 - P['wall_thk'], sec_l * 0.9)
+        inner.translate(T(0, 0, z + sec_l*0.05))
+        obj_inner = add_obj(inner, f"Boom_section_inner_{i}")
+        grp.addObject(obj_inner)
+    return grp
+
+def make_hga(doc, P_mod):
+    """
+    Antena HGA con plato aproximado, subreflector y mástil.
+    - Plato ligeramente cónico/curvo aproximado con cono truncado (manufacturable).
+    - Feed y subreflector como piezas separadas.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::HGA")
+    dish_r = P_mod.get('dish_r', 400.0)
+    dish_depth = P_mod.get('dish_depth', 120.0)
+    feed_d = P_mod.get('feed_d', 40.0)
+    subref_r = P_mod.get('subref_r', 60.0)
+    mast_r = P_mod.get('mast_r', 40.0)
+    mast_l = P_mod.get('mast_l', 600.0)
+
+    z = P['nose_len'] + P['mid_len'] + P['rear_len'] + 100.0
+
+    # Dish (aproximado por cono truncado: base grande - base pequeña)
+    dish = Part.makeCone(dish_r, dish_r * 0.55, dish_depth)
+    dish.translate(T(0, 0, z))
+    obj_dish = add_obj(dish, "HGA_dish")
+    grp.addObject(obj_dish)
+
+    # Subreflector
+    subref = Part.makeSphere(subref_r)
+    subref.translate(T(0, 0, z + dish_depth * 0.5))
+    obj_sub = add_obj(subref, "HGA_subreflector")
+    grp.addObject(obj_sub)
+
+    # Feed (cilindro)
+    feed = Part.makeCylinder(feed_d/2.0, feed_d * 1.5)
+    feed.translate(T(0, 0, z + dish_depth * 0.5 - feed_d * 0.2))
+    obj_feed = add_obj(feed, "HGA_feed")
+    grp.addObject(obj_feed)
+
+    # Mast
+    mast = Part.makeCylinder(mast_r, mast_l)
+    mast.translate(T(dish_r + 50.0, 0, z - mast_l/2.0))
+    obj_mast = add_obj(mast, "HGA_mast")
+    grp.addObject(obj_mast)
+
+    return grp
+
+def make_solar_panel(doc, P_mod):
+    """
+    Paneles solares triple-unión con bisagra paramétrica.
+    - Cada panel es sandwich de capas finas (3 capas para simular triple-junction)
+    - Bisagra representada como cilindro (pieza separable) en un borde
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::SolarPanel")
+    panel_l = P_mod.get('panel_l', P['panel_l'])
+    panel_w = P_mod.get('panel_w', P['panel_w'])
+    panel_thk = P_mod.get('panel_thk', 40.0)
+    hinge_d = P_mod.get('hinge_d', 20.0)
+    layers = int(P_mod.get('layers', 3))
+
+    z = P['nose_len'] + P['mid_len'] + 400.0
+
+    # Dividir panel si demasiado largo
+    sections = split_into_sections(panel_l, P.get('max_section_length', 1200.0))
+    x0 = -panel_l / 2.0
+    idx = 0
+    for sec in sections:
+        # sandwich: varias capas apiladas en Z (sin booleanos)
+        for ly in range(layers):
+            thickness = panel_thk / layers
+            layer = centered_box(sec, panel_w, thickness, center=(x0 + sec/2.0, 0, z + ly*thickness))
+            obj_layer = add_obj(layer, f"Solar_panel_section{idx}_layer{ly}")
+            grp.addObject(obj_layer)
+        # Hinge marker en borde izquierdo de cada sección
+        hinge = Part.makeCylinder(hinge_d/2.0, 40.0)
+        hinge.translate(T(x0 + 5.0, -panel_w/2 - 20.0, z))
+        obj_hinge = add_obj(hinge, f"Solar_hinge_{idx}")
+        grp.addObject(obj_hinge)
+
+        x0 += sec
+        idx += 1
+
+    return grp
+
+def make_rack(doc, P_mod):
+    """
+    Racks internos para electrónica.
+    - Caja simple con estantes y agujeros de montaje (corte unificado para estantes).
+    - Se limita a 1 boolean cut para crear agujeros de montaje (aceptable y pequeño).
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Rack")
+    rw = P_mod.get('rack_w', 600.0)
+    rh = P_mod.get('rack_h', 300.0)
+    rd = P_mod.get('rack_d', 400.0)
+    shelf_thk = P_mod.get('shelf_thk', 8.0)
+    mh_d = P_mod.get('mount_holes_d', 6.0)
+    cols, rows = P_mod.get('mount_pattern', (4, 2))
+
+    z = P['nose_len'] + 200.0
+
+    # Caja externa (pared de espesor shelf_thk)
+    outer = centered_box(rw, rh, rd, center=(0, 0, z))
+    # Crear placeholder de cavidad interior por boolean cut (limitado a uno)
+    inner = centered_box(rw - 2 * shelf_thk, rh - 2 * shelf_thk, rd - shelf_thk, center=(0, 0, z + shelf_thk))
+    try:
+        rack_shell = outer.cut(inner)
+    except Exception as e:
+        App.Console.PrintMessage(f"Warning: rack shell boolean failed: {e}\nReturning outer for rack\n")
+        rack_shell = outer
+    obj_rack = add_obj(rack_shell, "Electronics_rack")
+    grp.addObject(obj_rack)
+
+    # Agujeros de montaje: crear cilindros y cortarlos del rack (un pequeño número)
+    hole_spacing_x = (rw - 2 * shelf_thk) / (cols + 1)
+    hole_spacing_y = (rh - 2 * shelf_thk) / (rows + 1)
+    holes = []
+    for i in range(cols):
+        for j in range(rows):
+            x = -rw/2 + shelf_thk + (i+1) * hole_spacing_x
+            y = -rh/2 + shelf_thk + (j+1) * hole_spacing_y
+            h = Part.makeCylinder(mh_d/2.0, rd + 10.0)
+            h.translate(T(x, y, z - 5.0))
+            holes.append(h)
+    # Aplicar cortes (agrupar todos los agujeros en una sola operación para minimizar booleans)
+    try:
+        if holes:
+            # Fusionar holes en un solo shape y cortar
+            holes_compound = holes[0]
+            for h in holes[1:]:
+                holes_compound = holes_compound.fuse(h)
+            rack_cut = rack_shell.cut(holes_compound)
+            obj_rack_cut = add_obj(rack_cut, "Electronics_rack_cut")
+            grp.addObject(obj_rack_cut)
+            # ocultar el objeto sin cortes si existe
+            doc.removeObject(obj_rack.Name)
+        else:
+            # no holes
+            pass
+    except Exception as e:
+        App.Console.PrintMessage(f"Warning: rack holes boolean failed: {e}\nKeeping rack without holes\n")
+        grp.addObject(obj_rack)
+
+    return grp
+
+# =============================================================================
+# FUNCIONES EXISTENTES REFACTORIZADAS (manteniendo la API pública)
+# - Ahora delegan en módulos o usan helpers simples
+# =============================================================================
+
+def crear_fuselaje():
+    """
+    Fuselaje simplificado manufacturable compuesto por 3 secciones:
+    - Nariz (cono interno cerrado para evitar cavidades imposibles; la nariz es sólido macizo concebido
+      como pieza mecanizable)
+    - Medio (cilindro)
+    - Trasera (cono)
+    Cada sección se deja como Part::Feature independiente para ensamblaje mecánico.
+    """
+    # Nariz
+    nose = cone(0.0, P['nose_base_d']/2.0, P['nose_len'], center_z=0.0)
+    nose_obj = add_obj(nose, "Hull_Nose")
+
+    # Medio (cilindro)
+    mid = cyl(P['mid_d']/2.0, P['mid_len'], center_z=P['nose_len'])
+    mid_obj = add_obj(mid, "Hull_Mid")
+
+    # Trasera
+    rear = cone(P['rear_d']/2.0, P['mid_d']/2.0, P['rear_len'], center_z=P['nose_len'] + P['mid_len'])
+    rear_obj = add_obj(rear, "Hull_Rear")
+
+    # Agrupar como subensamblaje
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Hull")
+    grp.addObject(nose_obj)
+    grp.addObject(mid_obj)
+    grp.addObject(rear_obj)
+    return grp
+
+def crear_reactor():
+    """
+    Reactor modelado como cilindro más tobera simple (cono truncado).
+    Las piezas quedan separadas para permitir mecanizado/ensamblaje.
+    """
+    reactor = cyl(P['reactor_d']/2.0, P['reactor_l'], center_z=P['nose_len'] + 1200.0)
+    obj_reactor = add_obj(reactor, "Reactor_body")
+
+    nozzle = cone(P['rear_d']/2.0, P['rear_d'], 800, center_z=P['nose_len'] + P['mid_len'] + P['rear_len'])
+    obj_nozzle = add_obj(nozzle, "Reactor_nozzle")
+
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Reactor")
+    grp.addObject(obj_reactor)
+    grp.addObject(obj_nozzle)
+    return grp
+
+def crear_habitat():
+    """
+    Módulo hábitat como cilindro seccionado y con marcador para panel de acceso.
+    Mantener pared paramétrica: se crea cilindro sólido; la cavidad interna se asume mecanizable.
+    """
+    hab = cyl(P['hab_d']/2.0, P['hab_l'], center_z=P['nose_len'] + P['mid_len'] + 500)
+    obj_hab = add_obj(hab, "Habitat_body")
+
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Habitat")
+    grp.addObject(obj_hab)
+    return grp
+
+def crear_cabina():
+    """
+    Cabina como cilindro compacto y chamfer/fillet representados por marcadores.
+    """
+    cockpit = cyl(P['cockpit_d']/2.0, P['cockpit_l'], center_z=50.0)
+    obj_cockpit = add_obj(cockpit, "Cabina_body")
+
+    # Añadir marcadores de fillet en las esquinas superiores para visualización (no boolean)
+    positions = (
+        (P['cockpit_d']/4.0, 0, 50.0 + P['cockpit_l']),
+        (-P['cockpit_d']/4.0, 0, 50.0 + P['cockpit_l'])
+    )
+    add_fillet_markers(cockpit, P['fillet_r'], "Cabina", positions)
+
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Cabina")
+    grp.addObject(obj_cockpit)
+    return grp
+
+def crear_tanques():
+    """
+    Tanques laterales como cilindros independientes con soporte de montaje (simple placa).
+    Evitar cavidades cerradas: tanque modelado como cilindro macizo; en detalle real sería substraído internamente.
+    """
+    zpos = P['nose_len'] + 1000
+    tankL = cyl(P['tank_r'], P['tank_l'], center_z=zpos)
+    tankL.translate(T(P['tank_off'], 0, 0))
+    obj_tankL = add_obj(tankL, "Tank_L")
+
+    tankR = cyl(P['tank_r'], P['tank_l'], center_z=zpos)
+    tankR.translate(T(-P['tank_off'], 0, 0))
+    obj_tankR = add_obj(tankR, "Tank_R")
+
+    # Soportes de montaje (placas) como objetos separados (evitan booleans)
+    plateL = centered_box(200.0, 80.0, 8.0, center=(P['tank_off'], 0, zpos - 100.0))
+    plateR = centered_box(200.0, 80.0, 8.0, center=(-P['tank_off'], 0, zpos - 100.0))
+    obj_plateL = add_obj(plateL, "Tank_plate_L")
+    obj_plateR = add_obj(plateR, "Tank_plate_R")
+
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Tanques")
+    grp.addObject(obj_tankL)
+    grp.addObject(obj_tankR)
+    grp.addObject(obj_plateL)
+    grp.addObject(obj_plateR)
+    return grp
+
+def crear_antena():
+    """
+    Antena con mástil y subreflector, delega en make_hga para estructura más detallada.
+    """
+    return make_hga(doc, P['hga'])
+
+def crear_tren():
+    """
+    Tren de aterrizaje con patas distribuidas alrededor del perímetro.
+    Cada pata es una pieza independiente (cilindro) con disco de apoyo separado.
+    """
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::LandingGear")
+    shapes = []
+    for idx in range(P['leg_count']):
+        ang = idx * (360.0 / P['leg_count'])
+        x = P['mid_d']/2.0 * math.cos(math.radians(ang))
+        y = P['mid_d']/2.0 * math.sin(math.radians(ang))
+        leg = Part.makeCylinder(P['leg_r'], P['leg_l'])
+        leg.translate(T(x, y, 0.0))
+        obj_leg = add_obj(leg, f"Leg_{idx}")
+        grp.addObject(obj_leg)
+
+        foot = Part.makeCylinder(P['foot_r'], P['foot_t'])
+        foot.translate(T(x, y, -P['foot_t']))
+        obj_foot = add_obj(foot, f"Foot_{idx}")
+        grp.addObject(obj_foot)
+    return grp
+
+def crear_radiadores():
+    """
+    Radiadores principales: delega en make_radiator para incluir heatpipes.
+    """
+    return make_radiator(doc, P['radiator'])
+
+def crear_docking():
+    """
+    Docking ring (brida) como cilindro corto. La interfase de acoplamiento se deja como cara plana para
+    uniones mecánicas estándar.
+    """
+    dock = cyl(P['dock_r'], P['dock_l'], center_z=P['nose_len'] + P['mid_len'] + P['rear_len'])
+    obj_dock = add_obj(dock, "Docking")
+    grp = doc.addObject("App::DocumentObjectGroup", "modules::Docking")
+    grp.addObject(obj_dock)
+    return grp
+
+# =============================================================================
+# Módulos avanzados añadidos según petición del usuario
+# =============================================================================
+
+# Crear módulos principales usando funciones make_<modulo>
+make_shield(doc, P['shield'])
+make_radiator(doc, P['radiator'])
+make_truss(doc, P['truss'])
+make_boom(doc, P['boom'])
+make_hga(doc, P['hga'])
+make_solar_panel(doc, P['solar_panel'])
+make_rack(doc, P['rack'])
+
+# Mantener creación de las piezas originales (ahora delegadas a funciones reusables)
+crear_fuselaje()
+crear_reactor()
+crear_habitat()
+crear_cabina()
+crear_tanques()
+crear_antena()
+crear_tren()
+crear_radiadores()
+crear_docking()
+
+# Sensores simples (mantener como ejemplos de puntos de montaje)
+sensor1 = Part.makeSphere(50)
+sensor1.translate(T(P['mid_d']/2.0, 0, P['nose_len'] + 2000))
+add_obj(sensor1, "Sensor_1")
+
+sensor2 = Part.makeSphere(50)
+sensor2.translate(T(-P['mid_d']/2.0, 0, P['nose_len'] + 2000))
+add_obj(sensor2, "Sensor_2")
+
+# Recomponer documento y mensaje final
+doc.recompute()
+App.Console.PrintMessage("Nave DFD Simplificada (refactor) creada con módulos y helpers.\\n")

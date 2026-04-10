@@ -1,0 +1,398 @@
+# -*- coding: utf-8 -*-
+"""
+modules/antenna_complex.py
+A modular FreeCAD module implementing a parametric high-gain antenna assembly.
+Designed for FreeCAD 0.20+, compatible with a SolidWorks/CATIA-like
+subassembly structure.
+
+Usage:
+    import FreeCAD as App
+    import modules.antenna_complex as antenna_mod
+    P = {}  # your global params (may include 'scale')
+    antenna_mod.make_antenna_complex(App.ActiveDocument, P)
+
+Design principles applied:
+- Each physical part is created as an independent Part::Feature (no destructive booleans).
+- Assembly is a grouped compound for convenience (no fused solids).
+- Local coordinate systems: each sub-part is generated at its local origin and positioned
+  with App.Placement to the assembly origin using parametric offsets and rotations.
+- Parameters live in P['antenna_complex'] subdictionary. Missing keys are filled with sensible defaults.
+- Avoid heavy boolean operations; maintain manufacturable geometry (cylinders, cones, spheres, boxes).
+"""
+
+import FreeCAD as App
+import Part
+import math
+
+# ---------------------------------------------------------------------------
+# Helper: add_obj
+# - Creates a Part::Feature in the provided document.
+# - Accepts a Shape and an optional Placement (App.Placement).
+# - Keeps parts independent; returns the created object.
+# ---------------------------------------------------------------------------
+def add_obj(doc, shape, name, placement=None):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    if placement is not None:
+        obj.Placement = placement
+    return obj
+
+# ---------------------------------------------------------------------------
+# Default module parameters (subdiccionario)
+# These are documented, consistent names. Units: mm (unless noted).
+# Users may pass a global P with 'antenna_complex' dict to override.
+# ---------------------------------------------------------------------------
+DEFAULT_P = {
+    'scale': 1.0,                         # Per-module scale multiplier
+    'origin_offset': App.Vector(0, 0, 0), # Assembly origin offset (App.Vector or tuple)
+
+    # Mast
+    'mast': {
+        'radius': 50.0,      # mast cylinder radius
+        'length': 1500.0,    # mast length
+        'wall_t': 5.0,       # wall thickness (if hollow versions are implemented)
+        'base_plate_d': 200.0,
+        'base_plate_t': 20.0,
+        'mast_variants': 'solid'  # 'solid' | 'hollow'
+    },
+
+    # Dish (main reflector)
+    'dish': {
+        'rim_R': 600.0,      # outer radius of dish
+        'depth': 180.0,      # sagitta / depth (controls cone/curvature)
+        'rim_th': 30.0,      # rim thickness (solid ring)
+        'back_clearance': 50.0, # clearance behind dish for feed placement
+        'segments': 64
+    },
+
+    # Feed & feed horn
+    'feed': {
+        'feed_r': 80.0,
+        'feed_l': 400.0,
+        'horn_angle': 18.0,  # degrees cone half-angle for feed horn
+        'feed_offset': 300.0 # distance from dish vertex along dish normal
+    },
+
+    # Subreflector (Gregory/Cassegrain style small reflector)
+    'subreflector': {
+        'type': 'convex_sphere', # 'convex_sphere' | 'convex_cone' | 'flat'
+        'radius': 150.0,
+        'offset': 250.0,         # along dish axis from dish vertex
+    },
+
+    # Positioning/orientation (assembly-level)
+    'assembly': {
+        'position': App.Vector(0, 0, 0),    # assembly origin in global coordinates
+        'rotation_deg': 0.0,                # rotation about Z of the whole assembly
+    },
+
+    # Manufacturing tolerances and options
+    'manufacture': {
+        'cnc_clearance': 1.0,
+        'print_fillet': 2.0,
+    },
+
+    # Naming / variant
+    'name_prefix': 'Antenna',
+}
+
+# ---------------------------------------------------------------------------
+# Utility: merge parameters
+# Merges DEFAULT_P with user-supplied subdict P_mod (non-destructive).
+# ---------------------------------------------------------------------------
+def _merge_params(P_global):
+    P_mod = DEFAULT_P.copy()
+    # If global P provides a subdictionary, merge keys (shallow merge)
+    if isinstance(P_global, dict) and 'antenna_complex' in P_global:
+        user = P_global['antenna_complex']
+        for k, v in user.items():
+            if k in P_mod and isinstance(P_mod[k], dict) and isinstance(v, dict):
+                # shallow merge of nested dict
+                nested = P_mod[k].copy()
+                nested.update(v)
+                P_mod[k] = nested
+            else:
+                P_mod[k] = v
+    # Apply overall scaling to numeric values inside nested dicts
+    s = 1.0
+    if isinstance(P_global, dict) and 'scale' in P_global:
+        try:
+            s = float(P_global['scale'])
+        except Exception:
+            s = 1.0
+    elif isinstance(P_mod.get('scale'), (int, float)):
+        s = float(P_mod.get('scale'))
+    # Apply scale (only to obvious numeric leaf values)
+    def _scale_dict(d):
+        for kk, vv in d.items():
+            if isinstance(vv, dict):
+                _scale_dict(vv)
+            elif isinstance(vv, (int, float)):
+                d[kk] = vv * s
+            # leave vectors, strings, booleans as-is
+    # Make a deep-ish copy to avoid mutating DEFAULT_P
+    import copy
+    P_mod = copy.deepcopy(P_mod)
+    _scale_dict(P_mod)
+    return P_mod
+
+# ---------------------------------------------------------------------------
+# make_mast
+# Create a mast at local origin (Z up). Returns created object.
+# Design: simple cylinder + base plate (both independent features).
+# ---------------------------------------------------------------------------
+def make_mast(doc, params, placement=None):
+    """
+    params: params['mast'] dictionary
+    placement: optional App.Placement to position mast in assembly
+    """
+    r = float(params.get('radius', 50.0))
+    L = float(params.get('length', 1500.0))
+    base_d = float(params.get('base_plate_d', 200.0))
+    base_t = float(params.get('base_plate_t', 20.0))
+    prefix = params.get('name_prefix', 'Mast')
+
+    # Mast body (solid cylinder)
+    mast_shape = Part.makeCylinder(r, L)
+    mast_name = f"{prefix}_Mast_Body"
+    mast_obj = add_obj(doc, mast_shape, mast_name, placement)
+
+    # Base plate (disk as cylinder) created at local origin (Z=0)
+    base_shape = Part.makeCylinder(base_d / 2.0, base_t)
+    # place base so its top aligns with mast bottom (i.e., base_t extends negative Z)
+    base_placement = None
+    if placement is None:
+        base_placement = App.Placement(App.Vector(0, 0, -base_t), App.Rotation())
+    else:
+        # compose placements: move base relative to mast placement
+        base_placement = App.Placement(placement.Base + App.Vector(0, 0, -base_t), placement.Rotation)
+    base_name = f"{prefix}_Base_Plate"
+    base_obj = add_obj(doc, base_shape, base_name, base_placement)
+
+    return {'mast': mast_obj, 'base': base_obj}
+
+# ---------------------------------------------------------------------------
+# make_dish
+# Create a parabolic-like dish approximation using a shallow cone or spherical
+# cap approximation — implemented as a truncated cone + rim ring to keep manufacturable.
+# The geometry is created at local origin with dish vertex at local Z=0 and dish
+# opening in +Z.
+# ---------------------------------------------------------------------------
+def make_dish(doc, params, placement=None):
+    """
+    params: params['dish'] dictionary
+    placement: optional App.Placement
+    Returns: dict of created objects: dish_shell, dish_rim
+    """
+    rim_R = float(params.get('rim_R', 600.0))
+    depth = float(params.get('depth', 180.0))
+    rim_th = float(params.get('rim_th', 30.0))
+    seg = int(max(12, params.get('segments', 64)))
+    prefix = params.get('name_prefix', 'Dish')
+
+    # Approximate dish as a shallow cone: small top radius near vertex, large base radius rim_R.
+    # top_radius chosen from depth to produce slope similar to parabolic (simple approx).
+    # top_radius = small to create approximate curvature; use max(1.0, rim_R * depth / (rim_R + depth))
+    top_radius = max(1.0, rim_R * (depth / max(1.0, rim_R)))
+    # Using Part.makeCone with height = depth, apex at Z=0, base at Z=depth
+    dish_shape = Part.makeCone(top_radius, rim_R, depth)
+    dish_name = f"{prefix}_Reflector"
+    # The dish "vertex" is at local Z=0, so placing is straightforward
+    dish_obj = add_obj(doc, dish_shape, dish_name, placement)
+
+    # Rim as solid ring (cylinder) placed at dish rim plane
+    rim_shape = Part.makeCylinder(rim_R, rim_th)
+    # Rim should sit so that its base at Z=depth - rim_th (so rim overlaps dish edge slightly)
+    rim_placement = None
+    if placement is None:
+        rim_placement = App.Placement(App.Vector(0, 0, depth - rim_th), App.Rotation())
+    else:
+        rim_placement = App.Placement(placement.Base + App.Vector(0, 0, depth - rim_th), placement.Rotation)
+    rim_name = f"{prefix}_Rim"
+    rim_obj = add_obj(doc, rim_shape, rim_name, rim_placement)
+
+    return {'dish': dish_obj, 'rim': rim_obj, 'depth': depth}
+
+# ---------------------------------------------------------------------------
+# make_feed
+# Create the feed assembly (feed cylinder + horn cone).
+# The feed is created with its local axis aligned to +Z and its root at local origin.
+# ---------------------------------------------------------------------------
+def make_feed(doc, params, placement=None):
+    """
+    params: params['feed'] dictionary
+    placement: optional App.Placement (positions feed relative to dish)
+    Returns: dict with feed_body and feed_horn objects
+    """
+    fr = float(params.get('feed_r', 80.0))
+    fl = float(params.get('feed_l', 400.0))
+    horn_angle = float(params.get('horn_angle', 18.0))
+    prefix = params.get('name_prefix', 'Feed')
+
+    # Feed body (cylinder)
+    feed_body = Part.makeCylinder(fr, fl)
+    feed_name = f"{prefix}_Body"
+    feed_obj = add_obj(doc, feed_body, feed_name, placement)
+
+    # Horn: approximate as cone with small tip (10% of feed radius)
+    tip_r = max(1.0, fr * 0.1)
+    horn_shape = Part.makeCone(fr, tip_r, fl * 0.7)
+    # Place horn so it continues from feed body end (offset in Z)
+    horn_placement = None
+    if placement is None:
+        horn_placement = App.Placement(App.Vector(0, 0, fl * 0.3), App.Rotation())
+    else:
+        horn_placement = App.Placement(placement.Base + App.Vector(0, 0, fl * 0.3), placement.Rotation)
+    horn_name = f"{prefix}_Horn"
+    horn_obj = add_obj(doc, horn_shape, horn_name, horn_placement)
+
+    return {'feed_body': feed_obj, 'horn': horn_obj}
+
+# ---------------------------------------------------------------------------
+# make_subreflector
+# Small secondary reflector placed along dish axis in front of feed.
+# Implemented as convex sphere (partial) or small cone depending on params.
+# ---------------------------------------------------------------------------
+def make_subreflector(doc, params, placement=None):
+    """
+    params: params['subreflector'] dictionary
+    placement: App.Placement to position subreflector relative to dish vertex
+    """
+    typ = params.get('type', 'convex_sphere')
+    r = float(params.get('radius', 150.0))
+    offset = float(params.get('offset', 250.0))
+    prefix = params.get('name_prefix', 'Subref')
+
+    if typ == 'convex_sphere':
+        # Create a sphere and keep it whole (no trimming).
+        sph = Part.makeSphere(r)
+        # Position sphere center at +offset along local Z (center location)
+        sph_placement = None
+        if placement is None:
+            sph_placement = App.Placement(App.Vector(0, 0, offset), App.Rotation())
+        else:
+            sph_placement = App.Placement(placement.Base + App.Vector(0, 0, offset), placement.Rotation)
+        sph_obj = add_obj(doc, sph, f"{prefix}_Sphere", sph_placement)
+        return {'subreflector': sph_obj}
+    else:
+        # fallback: small cone
+        cone = Part.makeCone(r * 0.5, r, r * 0.8)
+        cone_placement = None
+        if placement is None:
+            cone_placement = App.Placement(App.Vector(0, 0, offset), App.Rotation())
+        else:
+            cone_placement = App.Placement(placement.Base + App.Vector(0, 0, offset), placement.Rotation)
+        cone_obj = add_obj(doc, cone, f"{prefix}_Cone", cone_placement)
+        return {'subreflector': cone_obj}
+
+# ---------------------------------------------------------------------------
+# make_antenna_complex
+# Top-level function to create the full antenna subassembly.
+# It will:
+# - Merge parameters
+# - Create a local assembly origin and placement
+# - Create mast, dish, feed, subreflector at parametric offsets
+# - Return created objects and an assembly grouping object
+# ---------------------------------------------------------------------------
+def make_antenna_complex(doc, P_global):
+    """
+    Create the antenna complex in 'doc' using parameters from P_global['antenna_complex'].
+    Returns a dict with created objects and the assembly object (if grouping succeeded).
+    """
+    # Merge parameters with defaults and apply scaling
+    P = _merge_params(P_global if isinstance(P_global, dict) else {})
+    # Provide convenient aliases
+    mast_p = P.get('mast', {})
+    dish_p = P.get('dish', {})
+    feed_p = P.get('feed', {})
+    sub_p = P.get('subreflector', {})
+    assembly_p = P.get('assembly', {})
+    manuf = P.get('manufacture', {})
+    prefix = P.get('name_prefix', 'Antenna')
+
+    # Assembly placement in global doc coordinates
+    assembly_pos = assembly_p.get('position', App.Vector(0, 0, 0))
+    assembly_rot = float(assembly_p.get('rotation_deg', 0.0))
+    assembly_placement = App.Placement(assembly_pos, App.Rotation(App.Vector(0, 0, 1), assembly_rot))
+
+    # Use a local placement offset requested by user (origin_offset)
+    local_origin = P.get('origin_offset', App.Vector(0, 0, 0))
+    assembly_local_placement = App.Placement(assembly_placement.Base + local_origin, assembly_placement.Rotation)
+
+    created = {}
+
+    # 1) Mast: positioned at assembly origin (Z up)
+    mast_params = mast_p.copy()
+    mast_params['name_prefix'] = prefix
+    mast_objs = make_mast(doc, mast_params, placement=assembly_local_placement)
+    created.update(mast_objs)
+
+    # 2) Dish: place dish on top of mast (mast length defines Z)
+    mast_len = float(mast_p.get('length', 1500.0))
+    # dish vertex sits at mast top + back_clearance (we want dish facing +Z)
+    dish_offset_z = mast_len + float(dish_p.get('back_clearance', 50.0))
+    dish_placement = App.Placement(assembly_local_placement.Base + App.Vector(0, 0, dish_offset_z),
+                                   assembly_local_placement.Rotation)
+    dish_params = dish_p.copy()
+    dish_params['name_prefix'] = prefix
+    dish_objs = make_dish(doc, dish_params, placement=dish_placement)
+    created.update(dish_objs)
+
+    # 3) Feed: place feed in front of dish vertex along +Z by feed_offset
+    feed_offset = float(feed_p.get('feed_offset', 300.0))
+    feed_placement = App.Placement(dish_placement.Base + App.Vector(0, 0, feed_offset),
+                                   dish_placement.Rotation)
+    feed_params = feed_p.copy()
+    feed_params['name_prefix'] = prefix
+    feed_objs = make_feed(doc, feed_params, placement=feed_placement)
+    created.update(feed_objs)
+
+    # 4) Subreflector: place between dish vertex and feed
+    sub_params = sub_p.copy()
+    sub_params['name_prefix'] = prefix
+    # choose offset relative to dish vertex (sub_p['offset'] already scaled)
+    sub_objs = make_subreflector(doc, sub_params, placement=dish_placement)
+    created.update(sub_objs)
+
+    # 5) Optional: small mounting boss between feed and mast (simple cylinder)
+    boss_r = max(10.0, feed_p.get('feed_r', 80.0)*0.25)
+    boss_l = 30.0
+    boss_shape = Part.makeCylinder(boss_r, boss_l)
+    # place boss near feed base (slightly behind feed)
+    boss_placement = App.Placement(feed_placement.Base + App.Vector(0, 0, -boss_l - 10.0), feed_placement.Rotation)
+    boss_obj = add_obj(doc, boss_shape, f"{prefix}_Mount_Boss", boss_placement)
+    created['mount_boss'] = boss_obj
+
+    # 6) Grouping: create a compound as assembly representative (non-destructive)
+    # Collect shapes of the created objects (we do not remove them)
+    shape_list = []
+    for key, obj in created.items():
+        try:
+            # Some entries may be nested dicts or not Part::Feature; skip those
+            if hasattr(obj, 'Shape'):
+                shape_list.append(obj.Shape)
+        except Exception:
+            continue
+
+    assembly_obj = None
+    try:
+        if shape_list:
+            compound_shape = Part.makeCompound(shape_list)
+            assembly_obj = add_obj(doc, compound_shape, f"{prefix}_Assembly", placement=assembly_local_placement)
+            # set a custom property to reference members (simple list of labels)
+            assembly_obj.addProperty("App::PropertyStringList", "Members", "Assembly", "Member part labels")
+            assembly_obj.Members = [o.Name for o in created.values() if hasattr(o, "Name")]
+    except Exception as ex:
+        # Non-fatal: if compound fails (memory), just return created parts
+        App.Console.PrintMessage(f"[antenna_complex] Assembly grouping failed: {ex}\n")
+
+    created['assembly'] = assembly_obj
+    # Recompute doc to ensure visibility
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+    return created
+
+# End of module

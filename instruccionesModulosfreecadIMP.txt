@@ -1,0 +1,71 @@
+Quiero que amplíes mis macros de FreeCAD para que se comporten como un sistema CAD profesional usado en satélites reales, siguiendo estas reglas estrictas:
+
+1. Estándares de ingeniería espacial:
+   - Usa geometría manufacturable y realista.
+   - Añade espesores, tolerancias, interfaces mecánicas y puntos de montaje.
+   - Evita cavidades cerradas no mecanizables.
+   - Mantén piezas separables para CNC y ensamblaje.
+   - Usa espesores uniformes y paramétricos (wall_thk).
+   - Añade chaflanes y radios paramétricos (fillet_r, chamfer_r).
+
+2. Estilo Parker Solar Probe / Solar Orbiter:
+   - Blindajes Whipple multicapa con separadores.
+   - Radiadores con heatpipes y manifold.
+   - Booms científicos telescópicos.
+   - Antenas HGA con feed, subreflector y mástil.
+   - Paneles solares articulados con bisagras paramétricas.
+   - Trusses ligeros tipo sonda solar.
+   - Módulos electrónicos en racks internos.
+
+3. Arquitectura tipo CATIA/SolidWorks:
+   - Divide la nave en subensamblajes independientes dentro de /modules.
+   - Cada módulo debe tener su propio subdiccionario P['<modulo>'].
+   - Cada módulo debe tener su función make_<modulo>(doc, P).
+   - Implementa jerarquía: Part → Subassembly → Assembly.
+   - Usa sistemas de coordenadas locales para cada módulo.
+
+4. Manufactura real (CNC + impresión 3D):
+   - Evita booleanos pesados.
+   - Usa cilindros, conos, cajas, esferas y extrusiones simples.
+   - Mantén geometría apta para mecanizado 3/5 ejes.
+   - Evita voladizos extremos para impresión 3D.
+   - Añade tolerancias paramétricas (tolerance).
+   - Divide piezas grandes en secciones imprimibles.
+
+5. Estilo del código:
+   - Limpio, modular, reproducible.
+   - Sin dependencias externas.
+   - Compatible con FreeCAD 0.20+.
+   - Comentarios técnicos detallados.
+   - Cada pieza debe ser un Part::Feature independiente.
+
+6. Funcionalidades nuevas que quiero añadir:
+   - Blindaje térmico tipo Parker Solar Probe.
+   - Radiadores con heatpipes paramétricos.
+   - Truss estructural ligero tipo sonda solar.
+   - Mástiles científicos extensibles.
+   - Paneles solares de triple unión con bisagras.
+   - Antena HGA con estructura de soporte realista.
+   - Racks internos para electrónica.
+   - Interfaces mecánicas estandarizadas (NASA/ESA).Incluye:
+- Subdiccionario de parámetros P['<modulo>']
+- Función make_<modulo>(doc, P)
+- Geometría paramétrica manufacturable
+- Ensamblaje limpio tipo CATIA/SolidWorks Aerospace
+- Comentarios detallados
+- add_obj() para registrar cada pieza
+
+El código debe ser correcto, ejecutable y sin errores.Crea un módulo FreeCAD siguiendo mi estilo:
+- DEFAULTS con parámetros documentados
+- Helpers: T(), R(), centered_box(), cyl(), cone(), ring()
+- Evitar booleanos pesados
+- Piezas independientes como Part::Feature
+- Subensamblaje App::DocumentObjectGroup
+- Parametrización completa
+- Manufacturabilidad: espesores mínimos, sin cavidades cerradas
+- Comentarios técnicos.Refactoriza este módulo:
+- Extrae helpers repetidos
+- Reduce booleanos
+- Asegura imprimibilidad
+- Mantén compatibilidad con FreeCAD 0.20+
+- No cambies la API pública.
