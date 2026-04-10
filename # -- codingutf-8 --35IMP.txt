@@ -1,0 +1,851 @@
+# -*- coding:utf-8 -*-
+# Versión adaptada para CNC:
+# - Aplica escala global
+# - Evita cortes que dejan huecos (crea sólidos)
+# - Elimina paneles finos, reemplaza por bloques/sólidos robustos
+# - Fusiona el conjunto principal (intento con control de excepción)
+# =============================================================================
+
+import FreeCAD as App, Part, math
+
+doc = App.newDocument("Nave_DFD_XL_Solar_v2_extended_LITE_CNC")
+
+# =============================================================================
+# PARÁMETROS BASE
+# =============================================================================
+P = {
+    'scale': 2.0,
+
+    'nose_len': 1500.0, 'nose_base_d': 1100.0,
+    'mid_len': 3000.0, 'mid_d': 1800.0,
+    'rear_len': 1500.0, 'rear_d': 2200.0, 'hull_t': 30.0,
+
+    'shield_d': 2600.0, 'shield_flecha': 80.0,
+    't_ceramic': 4.0, 't_foam': 120.0, 't_cc': 12.0,
+    'rim_w': 60.0, 'rim_h': 80.0,
+
+    'hull_shield_t': 80.0, 'hull_shield_l': 2800.0,
+    'reactor_shield_t': 120.0, 'reactor_shield_l': 2200.0,
+
+    'reactor_d': 1500.0, 'reactor_l': 1800.0,
+
+    'hab_d': 1400.0, 'hab_l': 2500.0,
+
+    'cockpit_d': 900.0, 'cockpit_l': 800.0, 'window_r': 150.0,
+
+    'tank_r': 400.0, 'tank_l': 2000.0, 'tank_off': 1200.0,
+
+    'sphere_r': 450.0, 'sphere_off': 1600.0,
+
+    'wing_span': 2500.0, 'wing_th': 60.0, 'wing_l': 2200.0, 'wing_back_offset': 1200.0,
+
+    'collar_d_delta': 300.0, 'collar_h': 120.0, 'collar_t': 40.0,
+    'def_count': 8, 'def_l': 800.0, 'def_w': 160.0, 'def_t': 30.0,
+
+    'mast_l': 1000.0, 'mast_r': 40.0, 'dish_r': 400.0,
+
+    'leg_r': 100.0, 'leg_l': 800.0, 'foot_r': 250.0, 'foot_t': 50.0,
+
+    'dock_r': 400.0, 'dock_l': 300.0, 'dock_off': 800.0,
+
+    'sensor_r': 50.0, 'sensor_l': 200.0,
+
+    'beam_r': 50.0, 'beam_l': 3000.0,
+
+    'overlap': 2.0,
+
+    'panel_l': 3000.0, 'panel_w': 1500.0, 'panel_th': 20.0, 'panel_count': 4,
+    'boom_r': 50.0, 'boom_l': 4000.0, 'cooling_tube_r': 10.0,
+
+    'fields_boom_l': 5000.0, 'fields_boom_r': 30.0, 'fields_sensor_r': 100.0,
+    'sweap_sensor_r': 80.0, 'isis_sensor_r': 70.0, 'wispr_camera_r': 60.0,
+
+    'hg_antenna_dish_r': 600.0, 'hg_antenna_mast_l': 1500.0,
+
+    'nav_sensor_r': 40.0, 'nav_sensor_count': 6,
+
+    'truss_beam_r': 80.0, 'truss_beam_l': 6000.0, 'truss_count': 8,
+
+    'base_d': 3000.0, 'base_h': 200.0,
+
+    'bus_module_count': 4, 'bus_module_d': 1600.0, 'bus_module_l': 1200.0,
+    'bus_ring_od': 1800.0, 'bus_ring_id': 1700.0, 'bus_ring_th': 80.0,
+    'bus_reinforce_od': 1900.0, 'bus_reinforce_id': 1550.0,
+
+    'dish_truss_count': 12, 'dish_truss_th': 30.0,
+    'dish_rim_od': 1300.0, 'dish_rim_id': 1200.0,
+    'dish_feed_r': 80.0, 'dish_feed_l': 400.0, 'dish_subref_r': 300.0,
+
+    'truss_ext_count': 6, 'truss_ext_r': 40.0, 'truss_ext_l': 2500.0,
+
+    'rack_tank_count': 4, 'rack_tank_r': 300.0, 'rack_tank_l': 800.0, 'rack_mount_r': 1500.0,
+
+    'extra_boom_count': 2, 'extra_boom_r': 40.0, 'extra_boom_l': 2500.0, 'extra_sensor_r': 80.0,
+
+    'thin_panel_count': 4, 'thin_panel_arm_l': 1500.0, 'thin_panel_arm_r': 30.0,
+    'thin_panel_l': 2800.0, 'thin_panel_w': 500.0, 'thin_panel_th': 15.0,
+
+    'struct_ring_count': 6, 'struct_ring_od': 2400.0, 'struct_ring_id': 2200.0, 'struct_ring_th': 60.0,
+
+    'whipple_count': 3, 'whipple_gap': 40.0, 'whipple_th': 8.0,
+
+    'plate_count': 12, 'plate_l': 200.0, 'plate_w': 100.0, 'plate_th': 20.0,
+
+    'chamfer_r': 15.0,
+
+    'screw_hole_r': 6.0, 'screw_pattern': 16,
+
+    'battery_box_l': 800.0, 'battery_box_w': 600.0, 'battery_box_h': 200.0, 'battery_count': 8,
+    'converter_l': 300.0, 'converter_w': 200.0, 'converter_h': 100.0, 'converter_count': 4,
+    'rack_19in_l': 600.0, 'rack_19in_w': 550.0, 'rack_19in_h': 1800.0, 'rack_count': 6,
+
+    'heatpipe_r': 25.0, 'heatpipe_l': 3500.0, 'heatpipe_count': 16,
+    'radiator_panel_l': 2800.0, 'radiator_panel_w': 1200.0, 'radiator_panel_t': 30.0, 'radiator_count': 6,
+    'pump_l': 200.0, 'pump_w': 150.0, 'pump_h': 250.0, 'pump_count': 2,
+
+    'isru_box_l': 1200.0, 'isru_box_w': 800.0, 'isru_box_h': 600.0,
+    'intake_r': 150.0, 'intake_count': 8,
+    'processor_l': 600.0, 'processor_w': 400.0, 'processor_h': 300.0, 'processor_count': 2,
+    'storage_r': 400.0, 'storage_l': 600.0, 'storage_count': 4,
+
+    'rad_sensor_r': 80.0, 'rad_sensor_l': 150.0, 'rad_sensor_count': 12,
+    'mag_sensor_r': 60.0, 'mag_sensor_l': 120.0, 'mag_sensor_count': 6,
+    'mag_boom_l': 6000.0, 'mag_boom_r': 20.0,
+    'particle_r': 100.0, 'particle_count': 4,
+    'plasma_r': 180.0, 'plasma_l': 300.0, 'plasma_count': 2,
+    'dust_r': 80.0, 'dust_count': 4,
+
+    'phased_array_r': 1800.0, 'phased_array_t': 80.0, 'phased_array_offset': 2200.0,
+    'parabolic_r': 1200.0, 'parabolic_t': 30.0,
+    'parabolic_mast_l': 1500.0, 'parabolic_mast_r': 120.0, 'parabolic_count': 2,
+    'laser_r': 150.0, 'laser_l': 400.0, 'laser_count': 2,
+
+    'ion_engine_r': 200.0, 'ion_engine_l': 900.0, 'ion_engine_count': 8, 'ion_engine_ring_R': 2800.0,
+    'hollow_cathode_r': 40.0, 'hollow_cathode_l': 100.0, 'hollow_cathode_count': 8,
+    'hall_engine_r': 300.0, 'hall_engine_l': 800.0, 'hall_engine_count': 4, 'hall_engine_arm_l': 1400.0,
+    'ppu_l': 250.0, 'ppu_w': 200.0, 'ppu_h': 150.0, 'ppu_count': 4,
+
+    'solar_array_l': 6500.0, 'solar_array_w': 3500.0, 'solar_array_t': 35.0,
+    'solar_array_count': 4, 'solar_array_offset': 3800.0,
+    'hinge_r': 80.0, 'hinge_l': 200.0, 'hinge_count': 12,
+    'solar_frame_l': 6200.0, 'solar_frame_w': 3400.0, 'solar_frame_t': 20.0,
+    'concentrator_l': 3200.0, 'concentrator_count': 4,
+    'tilt_r': 120.0, 'tilt_l': 300.0, 'tilt_count': 6,
+
+    'whipple_outer_th': 60.0, 'whipple_outer_gap': 200.0,
+    'whipple_middle_th': 80.0, 'whipple_middle_gap': 150.0,
+    'whipple_inner_th': 60.0, 'whipple_inner_gap': 100.0,
+    'whipple_pe_th': 45.0, 'whipple_micro_th': 30.0, 'whipple_micro_gap': 80.0,
+    'baffle_r': 1000.0, 'baffle_t': 10.0, 'baffle_count': 8,
+
+    'dock_port_r': 600.0, 'dock_port_l': 250.0,
+    'dock_mech_l': 400.0, 'dock_mech_w': 300.0, 'dock_mech_h': 300.0, 'dock_mech_count': 4,
+    'soft_dock_r': 300.0, 'soft_dock_l': 400.0,
+    'capture_r': 200.0, 'capture_l': 300.0, 'capture_count': 6,
+
+    'landing_leg_r': 150.0, 'landing_leg_l': 1200.0, 'landing_leg_count': 4, 'landing_leg_R': 1600.0,
+    'landing_pad_r': 400.0, 'landing_pad_t': 80.0,
+    'landing_actuator_r': 80.0, 'landing_actuator_l': 400.0, 'landing_actuator_count': 4,
+    'landing_bearing_r': 120.0, 'landing_bearing_t': 80.0,
+
+    'scale_d': 1.0, 'scale_l': 1.0,
+}
+
+# Aplicar escala global a valores numéricos (salvo contadores)
+for k, v in list(P.items()):
+    if k == 'scale':
+        continue
+    if 'count' in k:
+        continue
+    if isinstance(v, (int, float)):
+        P[k] = v * P['scale']
+
+# =============================================================================
+# UTILIDADES
+# =============================================================================
+def add_obj(shape, name):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    return obj
+
+# =============================================================================
+# 1) FUSELAJE PRINCIPAL (nodos sólidos)
+# =============================================================================
+nose = Part.makeCone(0, P['nose_base_d']/2.0, P['nose_len'])
+mid = Part.makeCylinder(P['mid_d']/2.0, P['mid_len'])
+mid.translate(App.Vector(0, 0, P['nose_len']))
+rear = Part.makeCone(P['rear_d']/2.0, P['mid_d']/2.0, P['rear_len'])
+rear.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len']))
+
+hull = nose.fuse(mid).fuse(rear)
+add_obj(hull, "Hull")
+
+# =============================================================================
+# 2) TPS FRONTAL (sólido, sin cortes internos)
+# =============================================================================
+shield_R = P['shield_d'] / 2.0
+cer = Part.makeCylinder(shield_R, P['t_ceramic'])
+cone = Part.makeCone(shield_R, max(shield_R - 40.0, 0.1), P['shield_flecha'])
+cone.translate(App.Vector(0, 0, -P['shield_flecha']))
+cer = cer.fuse(cone)
+
+foam = Part.makeCylinder(max(shield_R - P['overlap'], 0.1), P['t_foam'])
+foam.translate(App.Vector(0, 0, P['t_ceramic'] - P['overlap']))
+
+back = Part.makeCylinder(max(shield_R - 2 * P['overlap'], 0.1), P['t_cc'])
+back.translate(App.Vector(0, 0, P['t_ceramic'] + P['t_foam'] - 2 * P['overlap']))
+
+# Rim como sólido (evitamos cortar para no dejar huecos)
+rimOD = shield_R
+rim = Part.makeCylinder(rimOD, P['rim_h'])
+rim.translate(App.Vector(0, 0, P['t_ceramic'] + P['t_foam'] + P['t_cc'] - P['rim_h']))
+
+shield = cer.fuse(foam).fuse(back).fuse(rim)
+shield.translate(App.Vector(0, 0, -(P['t_ceramic'] + P['t_foam'] + P['t_cc'])))
+add_obj(shield, "TPS_Shield")
+
+# =============================================================================
+# 3) BLINDAJES TPS (MANGAS) - sólidos
+# =============================================================================
+hull_shield = Part.makeCylinder(P['mid_d']/2.0 + P['hull_shield_t'], P['hull_shield_l'])
+hull_shield.translate(App.Vector(0, 0, P['nose_len'] + (P['mid_len'] - P['hull_shield_l'])/2.0))
+add_obj(hull_shield, "Hull_Shield")
+
+reactor_shield = Part.makeCylinder(P['reactor_d']/2.0 + P['reactor_shield_t'], P['reactor_shield_l'])
+reactor_shield.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len'] - 200.0))
+add_obj(reactor_shield, "Reactor_Shield")
+
+# =============================================================================
+# 4) REACTOR + BOQUILLA
+# =============================================================================
+reactor = Part.makeCylinder(P['reactor_d']/2.0, P['reactor_l'])
+reactor.translate(App.Vector(0, 0, P['nose_len'] + 1200))
+nozzle = Part.makeCone(P['rear_d']/2.0, P['rear_d'], 1000)
+nozzle.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len'] + P['rear_len']))
+reactor_full = reactor.fuse(nozzle)
+add_obj(reactor_full, "Reactor")
+
+# =============================================================================
+# 5) MÓDULO HÁBITAT
+# =============================================================================
+hab = Part.makeCylinder(P['hab_d']/2.0, P['hab_l'])
+hab.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len'] + 500))
+add_obj(hab, "Hab_Module")
+
+# =============================================================================
+# 6) CABINA (sin recortar ventana para evitar hueco)
+# =============================================================================
+cockpit = Part.makeCylinder(P['cockpit_d']/2.0, P['cockpit_l'])
+cockpit.translate(App.Vector(0, 0, 50))
+add_obj(cockpit, "Cockpit")
+
+# (Si quieres ventana sólida como adorno, la podemos crear como pieza separada)
+window = Part.makeSphere(P['window_r'])
+window.translate(App.Vector(P['cockpit_d']/3.0, 0, P['cockpit_l']/2.0))
+add_obj(window, "Cockpit_Window_Decor")
+
+# =============================================================================
+# 7) TANQUES LATERALES Y ESFÉRICOS
+# =============================================================================
+tankL = Part.makeCylinder(P['tank_r'], P['tank_l'])
+tankL.translate(App.Vector(P['tank_off'], 0, P['nose_len'] + 1000))
+tankR = Part.makeCylinder(P['tank_r'], P['tank_l'])
+tankR.translate(App.Vector(-P['tank_off'], 0, P['nose_len'] + 1000))
+sphereL = Part.makeSphere(P['sphere_r'])
+sphereL.translate(App.Vector(P['sphere_off'], 0, P['nose_len'] + 2500))
+sphereR = Part.makeSphere(P['sphere_r'])
+sphereR.translate(App.Vector(-P['sphere_off'], 0, P['nose_len'] + 2500))
+
+add_obj(tankL, "Tank_Left")
+add_obj(tankR, "Tank_Right")
+add_obj(sphereL, "Tank_Sphere_Left")
+add_obj(sphereR, "Tank_Sphere_Right")
+
+# =============================================================================
+# 8) RADIADORES (bloques robustos en lugar de paneles finos)
+# =============================================================================
+# Reemplazamos las aletas planas por bloques sólidos de mayor espesor (más aptos para CNC)
+rad_thickness = max(P['wing_th'] * 4.0, 100.0)  # aumentar espesor para CNC
+radiator_block_L = Part.makeBox(P['wing_span'], rad_thickness, P['wing_l'])
+radiator_block_L.translate(App.Vector(-P['wing_span']/2.0, -P['mid_d']/2.0 - 150 - rad_thickness, P['nose_len'] + P['mid_len'] + P['wing_back_offset']))
+radiator_block_R = Part.makeBox(P['wing_span'], rad_thickness, P['wing_l'])
+radiator_block_R.translate(App.Vector(-P['wing_span']/2.0, P['mid_d']/2.0 + 150.0, P['nose_len'] + P['mid_len'] + P['wing_back_offset']))
+
+add_obj(radiator_block_L, "Radiator_Block_Left")
+add_obj(radiator_block_R, "Radiator_Block_Right")
+
+# =============================================================================
+# 9) COLLAR Y DEFLECTORES (sin cortes)
+# =============================================================================
+collarOD = P['mid_d'] + P['collar_d_delta']
+collar = Part.makeCylinder(collarOD/2.0, P['collar_h'])
+collar.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len']/2.0 - P['collar_h']/2.0))
+add_obj(collar, "Collar")
+
+for i in range(int(P['def_count'])):
+    ang = i * (360.0 / P['def_count'])
+    d = Part.makeBox(P['def_l'], P['def_w'], P['def_t'])
+    baseR = collarOD/2.0 + P['overlap']
+    d.translate(App.Vector(-P['def_l']/2.0, -P['def_w']/2.0,
+                           P['nose_len'] + P['mid_len']/2.0 - P['def_t']/2.0))
+    d.Placement = App.Placement(App.Vector(baseR, 0, 0),
+                                App.Rotation(App.Vector(0, 0, 1), ang))
+    add_obj(d, f"Deflector_{i}")
+
+# =============================================================================
+# 10) ACOPLAMIENTOS
+# =============================================================================
+dockL = Part.makeCylinder(P['dock_r'], P['dock_l'])
+dockL.translate(App.Vector(P['dock_off'], 0, P['nose_len'] + 1800))
+dockR = Part.makeCylinder(P['dock_r'], P['dock_l'])
+dockR.translate(App.Vector(-P['dock_off'], 0, P['nose_len'] + 1800))
+add_obj(dockL, "Dock_Left")
+add_obj(dockR, "Dock_Right")
+
+# =============================================================================
+# 11) SENSORES (sólidos)
+# =============================================================================
+sensor1 = Part.makeSphere(P['sensor_r'])
+sensor1.translate(App.Vector(P['mid_d']/2.0 + 100.0, 0, P['nose_len'] + 2000))
+sensor2 = Part.makeSphere(P['sensor_r'])
+sensor2.translate(App.Vector(-P['mid_d']/2.0 - 100.0, 0, P['nose_len'] + 2000))
+add_obj(sensor1, "Sensor_Left")
+add_obj(sensor2, "Sensor_Right")
+
+# =============================================================================
+# 12) REFUERZOS INTERNOS
+# =============================================================================
+beam1 = Part.makeCylinder(P['beam_r'], P['beam_l'])
+beam1.translate(App.Vector(0, 0, P['nose_len']))
+beam2 = Part.makeCylinder(P['beam_r'], P['beam_l'])
+beam2.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len']))
+add_obj(beam1, "Beam_1")
+add_obj(beam2, "Beam_2")
+
+# =============================================================================
+# 13) ANTENA + PARABÓLICA BÁSICA
+# =============================================================================
+mast = Part.makeCylinder(P['mast_r'], P['mast_l'])
+mast.translate(App.Vector(P['mid_d']/2.0 + 100.0, 0, P['nose_len'] + P['mid_len']))
+dish_flat = Part.makeCone(P['dish_r'], max(P['dish_r'] - 200.0, 1.0), 180.0)
+dish_flat.translate(App.Vector(P['mid_d']/2.0 + 100.0, 0,
+                               P['nose_len'] + P['mid_len'] + P['mast_l']))
+add_obj(mast, "Antenna_Mast")
+add_obj(dish_flat, "Antenna_Dish")
+
+# =============================================================================
+# 14) TREN DE ATERRIZAJE
+# =============================================================================
+for idx, angle in enumerate([0, 90, 180, 270]):
+    leg = Part.makeCylinder(P['leg_r'], P['leg_l'])
+    leg.translate(App.Vector((P['mid_d']/2.0) * math.cos(math.radians(angle)),
+                             (P['mid_d']/2.0) * math.sin(math.radians(angle)), 0))
+    foot = Part.makeCylinder(P['foot_r'], P['foot_t'])
+    foot.translate(App.Vector((P['mid_d']/2.0) * math.cos(math.radians(angle)),
+                              (P['mid_d']/2.0) * math.sin(math.radians(angle)),
+                              -P['foot_t']))
+    add_obj(leg, f"Landing_Leg_{idx}")
+    add_obj(foot, f"Landing_Foot_{idx}")
+
+# =============================================================================
+# 15) PANELES SOLARES -> REEMPLAZADOS POR "BULK" (sin paneles finos)
+# =============================================================================
+# Creamos booms y un bloque robusto por cada panel (evitamos planchas delgadas)
+for i in range(int(P['panel_count'])):
+    ang = i * (360.0 / P['panel_count'])
+    bx = P['mid_d']/2.0 * math.cos(math.radians(ang))
+    by = P['mid_d']/2.0 * math.sin(math.radians(ang))
+    bz = P['nose_len'] + P['mid_len'] + 500
+
+    boom = Part.makeCylinder(P['boom_r'], P['boom_l'])
+    boom.translate(App.Vector(bx, by, bz))
+    add_obj(boom, f"Solar_Boom_{i}")
+
+    # Bulk en lugar de panel fino (bloque sólido para CNC)
+    bulk_size_x = max(P['boom_l'] * 0.6, 500.0)
+    bulk_size_y = max(P['panel_w'] * 0.5, 500.0)
+    bulk_size_z = max(P['panel_th'] * 10.0, 100.0)
+    bulk = Part.makeBox(bulk_size_x, bulk_size_y, bulk_size_z)
+    # colocar el bulk al final del boom (aprox.)
+    px = bx + (P['boom_l'] - bulk_size_x/2.0) * math.cos(math.radians(ang))
+    py = by + (P['boom_l'] - bulk_size_x/2.0) * math.sin(math.radians(ang))
+    bulk.translate(App.Vector(px, py, bz))
+    add_obj(bulk, f"Solar_Bulk_{i}")
+
+# =============================================================================
+# 16) INSTRUMENTOS CIENTÍFICOS
+# =============================================================================
+fields_boom = Part.makeCylinder(P['fields_boom_r'], P['fields_boom_l'])
+fields_boom.translate(App.Vector(0, P['mid_d']/2.0 + 200.0, P['nose_len'] + 1000))
+fields_sensor = Part.makeSphere(P['fields_sensor_r'])
+fields_sensor.translate(App.Vector(0, P['mid_d']/2.0 + 200.0 + P['fields_boom_l'],
+                                   P['nose_len'] + 1000))
+add_obj(fields_boom, "Fields_Boom")
+add_obj(fields_sensor, "Fields_Sensor")
+
+sweap = Part.makeSphere(P['sweap_sensor_r'])
+sweap.translate(App.Vector(P['mid_d']/2.0 + 300.0, 0, P['nose_len'] + 1500))
+add_obj(sweap, "SWEAP")
+
+isis = Part.makeSphere(P['isis_sensor_r'])
+isis.translate(App.Vector(-P['mid_d']/2.0 - 300.0, 0, P['nose_len'] + 1500))
+add_obj(isis, "ISIS")
+
+wispr = Part.makeSphere(P['wispr_camera_r'])
+wispr.translate(App.Vector(0, -P['mid_d']/2.0 - 200.0, P['nose_len'] + 2000))
+add_obj(wispr, "WISPR")
+
+# =============================================================================
+# 17) ANTENA DE ALTA GANANCIA
+# =============================================================================
+hg_mast = Part.makeCylinder(P['mast_r'], P['hg_antenna_mast_l'])
+hg_mast.translate(App.Vector(-P['mid_d']/2.0 - 200.0, 0,
+                             P['nose_len'] + P['mid_len'] + 1000))
+hg_dish = Part.makeCone(P['hg_antenna_dish_r'],
+                        max(P['hg_antenna_dish_r'] - 300.0, 1.0), 200)
+hg_dish.translate(App.Vector(-P['mid_d']/2.0 - 200.0, 0,
+                             P['nose_len'] + P['mid_len'] + 1000 + P['hg_antenna_mast_l']))
+add_obj(hg_mast, "HG_Mast")
+add_obj(hg_dish, "HG_Dish")
+
+# =============================================================================
+# 18) SENSORES DE NAVEGACIÓN
+# =============================================================================
+for i in range(int(P['nav_sensor_count'])):
+    ang = i * (360.0 / P['nav_sensor_count'])
+    sensor = Part.makeSphere(P['nav_sensor_r'])
+    sensor.translate(App.Vector((P['mid_d']/2.0) * math.cos(math.radians(ang)),
+                                (P['mid_d']/2.0) * math.sin(math.radians(ang)),
+                                P['nose_len'] + 500.0))
+    add_obj(sensor, f"Nav_Sensor_{i}")
+
+# =============================================================================
+# 19) TRUSS ESTRUCTURAL
+# =============================================================================
+for i in range(int(P['truss_count'])):
+    ang = i * (360.0 / P['truss_count'])
+    beam = Part.makeCylinder(P['truss_beam_r'], P['truss_beam_l'])
+    beam.translate(App.Vector((P['mid_d']/2.0) * math.cos(math.radians(ang)),
+                              (P['mid_d']/2.0) * math.sin(math.radians(ang)),
+                              P['nose_len']))
+    add_obj(beam, f"Truss_Beam_{i}")
+
+# =============================================================================
+# 20) BASE DE MONTAJE
+# =============================================================================
+base = Part.makeCylinder(P['base_d']/2.0, P['base_h'])
+base.translate(App.Vector(0, 0, -P['base_h']))
+add_obj(base, "Base")
+
+# =============================================================================
+# 21) BUS CENTRAL (sólidos, sin cortes internos)
+# =============================================================================
+bus_start_z = P['nose_len'] + P['mid_len'] + P['rear_len'] + 400.0
+
+for i in range(int(P['bus_module_count'])):
+    mod_z = bus_start_z + i * (P['bus_module_l'] + 150.0)
+
+    body = Part.makeCylinder(P['bus_module_d']/2.0 - i * 30.0, P['bus_module_l'])
+    body.translate(App.Vector(0, 0, mod_z))
+    add_obj(body, f"Bus_Module_{i}")
+
+    # Creamos anillo sólido (evitamos cortes que dejan huecos)
+    ring = Part.makeCylinder(P['bus_ring_od']/2.0 - i * 20.0, P['bus_ring_th'])
+    ring.translate(App.Vector(0, 0, mod_z + P['bus_module_l']/2.0))
+    add_obj(ring, f"Bus_Ring_{i}")
+
+    reinforce = Part.makeCylinder(P['bus_reinforce_od']/2.0 - i * 20.0, 120.0)
+    reinforce.translate(App.Vector(0, 0, mod_z + P['bus_module_l']/2.0))
+    add_obj(reinforce, f"Bus_Reinforce_{i}")
+
+# =============================================================================
+# 22) ANTENA PARABÓLICA DETALLADA (sin cortes para anillos)
+# =============================================================================
+dish_z = bus_start_z + P['bus_module_count'] * (P['bus_module_l'] + 150.0) + 300.0
+
+dish_base = Part.makeCylinder(P['hg_antenna_dish_r'], 250.0)
+dish_base.translate(App.Vector(0, 0, dish_z))
+add_obj(dish_base, "Dish_Base")
+
+dish_rim = Part.makeCylinder(P['dish_rim_od']/2.0, 40.0)  # sólido, no corte
+dish_rim.translate(App.Vector(0, 0, dish_z + 125.0))
+add_obj(dish_rim, "Dish_Rim")
+
+for i in range(int(P['dish_truss_count'])):
+    ang = i * (360.0 / P['dish_truss_count'])
+    strut = Part.makeBox(P['dish_truss_th'], P['hg_antenna_dish_r'] * 0.7, P['dish_truss_th'])
+    strut.Placement.Rotation = App.Rotation(App.Vector(0, 0, 1), ang)
+    strut_x = P['hg_antenna_dish_r'] * 0.4 * math.cos(math.radians(ang))
+    strut_y = P['hg_antenna_dish_r'] * 0.4 * math.sin(math.radians(ang))
+    strut.translate(App.Vector(strut_x, strut_y, dish_z))
+    add_obj(strut, f"Dish_Strut_{i}")
+
+feed = Part.makeCylinder(P['dish_feed_r'], P['dish_feed_l'])
+feed.translate(App.Vector(0, 0, dish_z + 250.0))
+add_obj(feed, "Dish_Feed")
+
+feed_horn = Part.makeCone(P['dish_feed_r'], max(P['dish_feed_r'] * 0.2, 1.0), 150.0)
+feed_horn.translate(App.Vector(0, 0, dish_z + 250.0 + P['dish_feed_l']))
+add_obj(feed_horn, "Dish_Feed_Horn")
+
+subref = Part.makeSphere(P['dish_subref_r'])
+subref.translate(App.Vector(0, 0, dish_z + 100.0))
+add_obj(subref, "Dish_Subreflector")
+
+# =============================================================================
+# 23) TRUSSES EXTERNOS
+# =============================================================================
+for i in range(int(P['truss_ext_count'])):
+    ang = i * (360.0 / P['truss_ext_count'])
+    ext_truss = Part.makeCylinder(P['truss_ext_r'], P['truss_ext_l'])
+    ext_truss.Placement.Rotation = App.Rotation(App.Vector(0, 0, 1), ang)
+    ext_x = (P['mid_d']/2.0 + 200.0) * math.cos(math.radians(ang))
+    ext_y = (P['mid_d']/2.0 + 200.0) * math.sin(math.radians(ang))
+    ext_truss.translate(App.Vector(ext_x, ext_y, P['nose_len'] + P['mid_len']/2.0))
+    add_obj(ext_truss, f"Ext_Truss_{i}")
+
+# =============================================================================
+# 24) TANQUES EN RACKS LATERALES
+# =============================================================================
+for i in range(int(P['rack_tank_count'])):
+    ang = i * (360.0 / P['rack_tank_count'])
+    if i % 2 == 0:
+        tank = Part.makeSphere(P['rack_tank_r'])
+    else:
+        tank = Part.makeCylinder(P['rack_tank_r'], P['rack_tank_l'])
+    tx = P['rack_mount_r'] * math.cos(math.radians(ang))
+    ty = P['rack_mount_r'] * math.sin(math.radians(ang))
+    tank.translate(App.Vector(tx, ty, P['nose_len'] + P['mid_len']))
+    add_obj(tank, f"Rack_Tank_{i}")
+
+# =============================================================================
+# 25) BOOMS ADICIONALES
+# =============================================================================
+boom_angles = [45, 135]
+for i in range(int(P['extra_boom_count'])):
+    ang = boom_angles[i]
+    boom_radius = P['mid_d']/2.0 + 400.0 + i * 300.0
+
+    boom = Part.makeCylinder(P['extra_boom_r'], P['extra_boom_l'])
+    boom.Placement.Rotation = App.Rotation(App.Vector(0, 0, 1), ang)
+    boom_x = boom_radius * math.cos(math.radians(ang))
+    boom_y = boom_radius * math.sin(math.radians(ang))
+    boom.translate(App.Vector(boom_x, boom_y, P['nose_len'] + P['mid_len'] + 300.0))
+    add_obj(boom, f"Extra_Boom_{i}")
+
+    sensor = Part.makeSphere(P['extra_sensor_r'])
+    sensor_x = (boom_radius + P['extra_boom_l']) * math.cos(math.radians(ang))
+    sensor_y = (boom_radius + P['extra_boom_l']) * math.sin(math.radians(ang))
+    sensor.translate(App.Vector(sensor_x, sensor_y, P['nose_len'] + P['mid_len'] + 300.0))
+    add_obj(sensor, f"Extra_Boom_Sensor_{i}")
+
+# =============================================================================
+# 26) PANELES DELGADOS -> OMITIDOS (reemplazados por bulks en secciones relevantes)
+# =============================================================================
+# Para CNC, las planchas delgadas suelen dar problemas; hemos evitado su creación directa.
+
+# =============================================================================
+# 27) ANILLOS ESTRUCTURALES (sólidos)
+# =============================================================================
+for i in range(int(P['struct_ring_count'])):
+    z = P['nose_len'] + i * (P['mid_len'] / max(1, (P['struct_ring_count'] - 1)))
+    ring_o = Part.makeCylinder(P['struct_ring_od']/2.0, P['struct_ring_th'])
+    ring_o.translate(App.Vector(0, 0, z))
+    add_obj(ring_o, f"Struct_Ring_{i}")
+
+# =============================================================================
+# 28) WHIPPLE MULTICAPA
+# =============================================================================
+for i in range(int(P['whipple_count'])):
+    z = P['nose_len'] - 200.0 - i * (P['whipple_gap'] + P['whipple_th'])
+    r = shield_R + 100.0 + i * 40.0
+    belt = Part.makeCylinder(r, P['whipple_th'])
+    belt.translate(App.Vector(0, 0, z))
+    add_obj(belt, f"Whipple_Layer_{i}")
+
+# =============================================================================
+# 29) PLACAS DE UNIÓN CNC
+# =============================================================================
+for i in range(int(P['plate_count'])):
+    ang = i * (360.0 / P['plate_count'])
+    x = (P['mid_d']/2.0 + 100.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 100.0) * math.sin(math.radians(ang))
+    plate = Part.makeBox(P['plate_l'], P['plate_w'], P['plate_th'])
+    plate.translate(App.Vector(x - P['plate_l']/2.0, y - P['plate_w']/2.0,
+                               P['nose_len'] + P['mid_len']/2.0))
+    add_obj(plate, f"CNC_Plate_{i}")
+
+# =============================================================================
+# 30) SISTEMAS ELÉCTRICOS (cajas sólidas)
+# =============================================================================
+for i in range(int(P['battery_count'])):
+    x = (i - P['battery_count']/2.0) * (P['battery_box_l'] + 50.0)
+    box = Part.makeBox(P['battery_box_l'], P['battery_box_w'], P['battery_box_h'])
+    box.translate(App.Vector(x, 0, P['nose_len'] + P['mid_len'] + 200.0))
+    add_obj(box, f"Battery_Box_{i}")
+
+for i in range(int(P['converter_count'])):
+    x = (i - P['converter_count']/2.0) * (P['converter_l'] + 40.0)
+    conv = Part.makeBox(P['converter_l'], P['converter_w'], P['converter_h'])
+    conv.translate(App.Vector(x, -P['mid_d']/2.0 - 300.0, P['nose_len'] + P['mid_len'] + 300.0))
+    add_obj(conv, f"Converter_{i}")
+
+for i in range(int(P['rack_count'])):
+    x = (i - P['rack_count']/2.0) * (P['rack_19in_l'] + 80.0)
+    rack = Part.makeBox(P['rack_19in_l'], P['rack_19in_w'], P['rack_19in_h'])
+    rack.translate(App.Vector(x, P['mid_d']/2.0 + 300.0, P['nose_len'] + 200.0))
+    add_obj(rack, f"Rack_19in_{i}")
+
+# =============================================================================
+# 31) REFRIGERACIÓN ACTIVA (heatpipes y bombas)
+# =============================================================================
+for i in range(int(P['heatpipe_count'])):
+    ang = i * (360.0 / P['heatpipe_count'])
+    x = (P['mid_d']/2.0 + 100.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 100.0) * math.sin(math.radians(ang))
+    hp = Part.makeCylinder(P['heatpipe_r'], P['heatpipe_l'])
+    hp.translate(App.Vector(x, y, P['nose_len'] + 500.0))
+    add_obj(hp, f"Heatpipe_{i}")
+
+for i in range(int(P['radiator_count'])):
+    # Reemplazamos panel plano por bloque grueso
+    x = (i - P['radiator_count']/2.0) * (P['radiator_panel_l'] + 100.0)
+    rad = Part.makeBox(P['radiator_panel_l'], max(P['radiator_panel_w'] * 0.5, 400.0), max(P['radiator_panel_t'] * 4.0, 80.0))
+    rad.translate(App.Vector(x, -P['mid_d']/2.0 - 600.0, P['nose_len'] + P['mid_len'] + 800.0))
+    add_obj(rad, f"Radiator_Panel_{i}")
+
+for i in range(int(P['pump_count'])):
+    pump = Part.makeBox(P['pump_l'], P['pump_w'], P['pump_h'])
+    pump.translate(App.Vector(0, (i*2 - 1) * 300.0, P['nose_len'] + P['mid_len'] + 400.0))
+    add_obj(pump, f"Pump_{i}")
+
+# =============================================================================
+# 32) ISRU
+# =============================================================================
+isru_box = Part.makeBox(P['isru_box_l'], P['isru_box_w'], P['isru_box_h'])
+isru_box.translate(App.Vector(0, 0, P['nose_len'] - 600.0))
+add_obj(isru_box, "ISRU_Box")
+
+for i in range(int(P['intake_count'])):
+    ang = i * (360.0 / P['intake_count'])
+    x = shield_R * math.cos(math.radians(ang))
+    y = shield_R * math.sin(math.radians(ang))
+    intake = Part.makeCylinder(P['intake_r'], 400.0)
+    intake.translate(App.Vector(x, y, P['nose_len'] - 800.0))
+    add_obj(intake, f"ISRU_Intake_{i}")
+
+for i in range(int(P['processor_count'])):
+    x = (i - P['processor_count']/2.0) * (P['processor_l'] + 80.0)
+    proc = Part.makeBox(P['processor_l'], P['processor_w'], P['processor_h'])
+    proc.translate(App.Vector(x, 0, P['nose_len'] - 900.0))
+    add_obj(proc, f"ISRU_Processor_{i}")
+
+for i in range(int(P['storage_count'])):
+    ang = i * (360.0 / P['storage_count'])
+    x = (P['mid_d']/2.0 + 300.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 300.0) * math.sin(math.radians(ang))
+    stor = Part.makeCylinder(P['storage_r'], P['storage_l'])
+    stor.translate(App.Vector(x, y, P['nose_len'] - 1100.0))
+    add_obj(stor, f"ISRU_Storage_{i}")
+
+# =============================================================================
+# 33) SENSORES DE RADIACIÓN Y MAGNETÓMETROS
+# =============================================================================
+for i in range(int(P['rad_sensor_count'])):
+    ang = i * (360.0 / P['rad_sensor_count'])
+    x = (P['mid_d']/2.0 + 150.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 150.0) * math.sin(math.radians(ang))
+    rs = Part.makeCylinder(P['rad_sensor_r'], P['rad_sensor_l'])
+    rs.translate(App.Vector(x, y, P['nose_len'] + 300.0))
+    add_obj(rs, f"Rad_Sensor_{i}")
+
+for i in range(int(P['mag_sensor_count'])):
+    ang = i * (360.0 / P['mag_sensor_count'])
+    x = (P['mid_d']/2.0 + 200.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 200.0) * math.sin(math.radians(ang))
+    ms = Part.makeCylinder(P['mag_sensor_r'], P['mag_sensor_l'])
+    ms.translate(App.Vector(x, y, P['nose_len'] + 400.0))
+    add_obj(ms, f"Mag_Sensor_{i}")
+
+mag_boom = Part.makeCylinder(P['mag_boom_r'], P['mag_boom_l'])
+mag_boom.translate(App.Vector(0, P['mid_d']/2.0 + 400.0, P['nose_len'] + 200.0))
+add_obj(mag_boom, "Mag_Boom")
+
+for i in range(int(P['particle_count'])):
+    ang = i * (360.0 / P['particle_count'])
+    x = (P['mid_d']/2.0 + 250.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 250.0) * math.sin(math.radians(ang))
+    ps = Part.makeSphere(P['particle_r'])
+    ps.translate(App.Vector(x, y, P['nose_len'] + 600.0))
+    add_obj(ps, f"Particle_Det_{i}")
+
+for i in range(int(P['plasma_count'])):
+    ang = i * (360.0 / P['plasma_count'])
+    x = (P['mid_d']/2.0 + 300.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 300.0) * math.sin(math.radians(ang))
+    pl = Part.makeCylinder(P['plasma_r'], P['plasma_l'])
+    pl.translate(App.Vector(x, y, P['nose_len'] + 700.0))
+    add_obj(pl, f"Plasma_Probe_{i}")
+
+for i in range(int(P['dust_count'])):
+    ang = i * (360.0 / P['dust_count'])
+    x = (P['mid_d']/2.0 + 350.0) * math.cos(math.radians(ang))
+    y = (P['mid_d']/2.0 + 350.0) * math.sin(math.radians(ang))
+    ds = Part.makeSphere(P['dust_r'])
+    ds.translate(App.Vector(x, y, P['nose_len'] + 800.0))
+    add_obj(ds, f"Dust_Sensor_{i}")
+
+# =============================================================================
+# 34) COMMS
+# =============================================================================
+phased = Part.makeCylinder(P['phased_array_r'], P['phased_array_t'])
+phased.translate(App.Vector(0, 0, P['nose_len'] + P['phased_array_offset']))
+add_obj(phased, "Phased_Array")
+
+for i in range(int(P['parabolic_count'])):
+    sign = 1 if i == 0 else -1
+    mast = Part.makeCylinder(P['parabolic_mast_r'], P['parabolic_mast_l'])
+    mast.translate(App.Vector(sign * (P['mid_d']/2.0 + 400.0), 0,
+                              P['nose_len'] + P['mid_len'] + 800.0))
+    add_obj(mast, f"Parabolic_Mast_{i}")
+
+    dish = Part.makeCone(P['parabolic_r'], max(P['parabolic_r'] - 200.0, 1.0), 200.0)
+    dish.translate(App.Vector(sign * (P['mid_d']/2.0 + 400.0),
+                              0,
+                              P['nose_len'] + P['mid_len'] + 800.0 + P['parabolic_mast_l']))
+    add_obj(dish, f"Parabolic_Dish_{i}")
+
+for i in range(int(P['laser_count'])):
+    sign = 1 if i == 0 else -1
+    laser = Part.makeCylinder(P['laser_r'], P['laser_l'])
+    laser.translate(App.Vector(sign * (P['mid_d']/2.0 + 500.0), 0,
+                               P['nose_len'] + P['mid_len'] + 1200.0))
+    add_obj(laser, f"Laser_Comm_{i}")
+
+# =============================================================================
+# 35) PROPULSIÓN IÓNICA
+# =============================================================================
+for i in range(int(P['ion_engine_count'])):
+    ang = i * (360.0 / P['ion_engine_count'])
+    x = P['ion_engine_ring_R'] * math.cos(math.radians(ang))
+    y = P['ion_engine_ring_R'] * math.sin(math.radians(ang))
+    ie = Part.makeCone(P['ion_engine_r'], P['ion_engine_r'] * 0.5, P['ion_engine_l'])
+    ie.translate(App.Vector(x, y, P['nose_len'] + P['mid_len'] + P['rear_len'] + 200.0))
+    add_obj(ie, f"Ion_Engine_{i}")
+
+for i in range(int(P['hollow_cathode_count'])):
+    hc = Part.makeCylinder(P['hollow_cathode_r'], P['hollow_cathode_l'])
+    hc.translate(App.Vector((i - P['hollow_cathode_count']/2.0) * 200.0,
+                            -P['mid_d']/2.0 - 300.0,
+                            P['nose_len'] + P['mid_len'] + 300.0))
+    add_obj(hc, f"Hollow_Cathode_{i}")
+
+for i in range(int(P['hall_engine_count'])):
+    sign = 1 if i % 2 == 0 else -1
+    he = Part.makeCylinder(P['hall_engine_r'], P['hall_engine_l'])
+    he.translate(App.Vector(0,
+                            sign * (P['hall_engine_arm_l'] + i * 200.0),
+                            P['nose_len'] + P['mid_len'] + P['rear_len'] - 200.0))
+    add_obj(he, f"Hall_Engine_{i}")
+
+for i in range(int(P['ppu_count'])):
+    ppu = Part.makeBox(P['ppu_l'], P['ppu_w'], P['ppu_h'])
+    ppu.translate(App.Vector((i - P['ppu_count']/2.0) * (P['ppu_l'] + 50.0),
+                             P['mid_d']/2.0 + 400.0,
+                             P['nose_len'] + P['mid_len'] + 200.0))
+    add_obj(ppu, f"PPU_{i}")
+
+# =============================================================================
+# 36) PANELES SOLARES EXTENDIDOS -> OMITIDOS/REEMPLAZADOS POR BULKS
+# =============================================================================
+for i in range(int(P['solar_array_count'])):
+    ang = i * (360.0 / P['solar_array_count'])
+    base_x = P['mid_d']/2.0 * math.cos(math.radians(ang))
+    base_y = P['mid_d']/2.0 * math.sin(math.radians(ang))
+    base_z = P['nose_len'] + P['mid_len'] + P['solar_array_offset']
+
+    hinge = Part.makeCylinder(P['hinge_r'], P['hinge_l'])
+    hinge.translate(App.Vector(base_x, base_y, base_z))
+    add_obj(hinge, f"Solar_Hinge_{i}")
+
+    # Frame y paneles reemplazados por bloque robusto
+    frame = Part.makeBox(max(P['solar_frame_l']*0.5, 1000.0), max(P['solar_frame_w']*0.2, 500.0), max(P['solar_frame_t']*5.0, 80.0))
+    frame.translate(App.Vector(base_x + 200.0 * math.cos(math.radians(ang)),
+                               base_y + 200.0 * math.sin(math.radians(ang)),
+                               base_z))
+    add_obj(frame, f"Solar_Frame_{i}")
+
+    panel_bulk = Part.makeBox(max(P['solar_array_l']*0.5, 2000.0), max(P['solar_array_w']*0.5, 1500.0), max(P['solar_array_t']*10.0, 80.0))
+    panel_bulk.translate(App.Vector(base_x + 200.0 * math.cos(math.radians(ang)) + 500.0,
+                               base_y + 200.0 * math.sin(math.radians(ang)) + 0.0,
+                               base_z + 50.0))
+    add_obj(panel_bulk, f"Solar_Array_Bulk_{i}")
+
+# =============================================================================
+# 37) DOCKING EXTENDIDO
+# =============================================================================
+dock_port = Part.makeCylinder(P['dock_port_r'], P['dock_port_l'])
+dock_port.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len'] + P['rear_len'] + 800.0))
+add_obj(dock_port, "Dock_Port")
+
+for i in range(int(P['dock_mech_count'])):
+    x = (i - P['dock_mech_count']/2.0) * (P['dock_mech_l'] + 40.0)
+    mech = Part.makeBox(P['dock_mech_l'], P['dock_mech_w'], P['dock_mech_h'])
+    mech.translate(App.Vector(x, 0, P['nose_len'] + P['mid_len'] + P['rear_len'] + 700.0))
+    add_obj(mech, f"Dock_Mech_{i}")
+
+soft_dock = Part.makeCylinder(P['soft_dock_r'], P['soft_dock_l'])
+soft_dock.translate(App.Vector(0, 0, P['nose_len'] + P['mid_len'] + P['rear_len'] + 600.0))
+add_obj(soft_dock, "Soft_Dock")
+
+for i in range(int(P['capture_count'])):
+    ang = i * (360.0 / P['capture_count'])
+    x = (P['dock_port_r'] + 200.0) * math.cos(math.radians(ang))
+    y = (P['dock_port_r'] + 200.0) * math.sin(math.radians(ang))
+    cap = Part.makeCylinder(P['capture_r'], P['capture_l'])
+    cap.translate(App.Vector(x, y, P['nose_len'] + P['mid_len'] + P['rear_len'] + 650.0))
+    add_obj(cap, f"Capture_Mech_{i}")
+
+# =============================================================================
+# 38) LANDING GEAR EXTENDIDO
+# =============================================================================
+for i in range(int(P['landing_leg_count'])):
+    ang = i * (360.0 / P['landing_leg_count'])
+    x = P['landing_leg_R'] * math.cos(math.radians(ang))
+    y = P['landing_leg_R'] * math.sin(math.radians(ang))
+
+    leg = Part.makeCylinder(P['landing_leg_r'], P['landing_leg_l'])
+    leg.translate(App.Vector(x, y, -P['landing_leg_l']/2.0))
+    add_obj(leg, f"Landing_Leg_Ext_{i}")
+
+    pad = Part.makeCylinder(P['landing_pad_r'], P['landing_pad_t'])
+    pad.translate(App.Vector(x, y, -P['landing_leg_l'] - P['landing_pad_t']))
+    add_obj(pad, f"Landing_Pad_{i}")
+
+for i in range(int(P['landing_actuator_count'])):
+    ang = i * (360.0 / P['landing_actuator_count'])
+    x = (P['landing_leg_R'] - 300.0) * math.cos(math.radians(ang))
+    y = (P['landing_leg_R'] - 300.0) * math.sin(math.radians(ang))
+    act = Part.makeCylinder(P['landing_actuator_r'], P['landing_actuator_l'])
+    act.translate(App.Vector(x, y, -P['landing_actuator_l']/2.0))
+    add_obj(act, f"Landing_Actuator_{i}")
+
+bearing = Part.makeCylinder(P['landing_bearing_r'], P['landing_bearing_t'])
+bearing.translate(App.Vector(0, 0, -P['landing_bearing_t']/2.0))
+add_obj(bearing, "Landing_Bearing")
+
+# =============================================================================
+# AGRUPACIÓN / FUSIÓN DEL CONJUNTO PRINCIPAL (intento controlado)
+# =============================================================================
+# Fusión de Hull + Collar + Hull_Shield + Reactor + Hab + Cockpit en "Main_Structure"
+try:
+    main = hull.fuse(collar).fuse(hull_shield).fuse(reactor_full).fuse(hab).fuse(cockpit)
+    add_obj(main, "Main_Structure")
+except Exception as e:
+    # Si la fusión es muy costosa/produce error, lo dejamos como piezas separadas
+    App.Console.PrintMessage("Fusión principal fallida (demasiado costosa). Se conservan piezas individuales.\n")
+
+# =============================================================================
+# FIN: recompute
+# =============================================================================
+doc.recompute()
